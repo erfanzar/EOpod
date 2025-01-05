@@ -1,0 +1,59 @@
+[tool.poetry]
+name = "eopod"
+version = "0.0.0"
+
+description = "EOpod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
+authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
+license = "Apache-2.0"
+readme = "README.md"
+
+homepage = "https://github.com/erfanzar/EOpod"
+repository = "https://github.com/erfanzar/EOpod"
+documentation = "https://eopod.readthedocs.io/en/latest/"
+
+keywords = ["EOpod"]
+
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"Intended Audience :: Developers",
+	"Topic :: Scientific/Engineering :: Artificial Intelligence",
+	"License :: OSI Approved :: Apache Software License",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.14"
+click = "^8.0"  
+rich = "^13.7.0"
+pyyaml = "^6.0.1"
+
+[tool.poetry.scripts]
+eopod = "eopod:main"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["E501", "B905", "B007"]
+unfixable = ["B"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401"]
+"**/{tests,docs,tools}/*" = ["E402"]
+"tests/*" = ["E402", "E731"]
+"benchmarks/*" = ["E402", "E731"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "tab"
+docstring-code-format = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+indent-width = 2
