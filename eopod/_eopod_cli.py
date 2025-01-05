@@ -261,6 +261,7 @@ def configure(project_id, zone, tpu_name):
 	is_flag=True,
 	help="Run the command in the background, detached from the session",
 )
+@async_command
 async def run(command, worker, retry, delay, timeout, interactive, stream, nohup):
 	"""Run a command on TPU VM with advanced features"""
 	config = EOConfig()
