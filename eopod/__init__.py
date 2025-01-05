@@ -19,7 +19,12 @@ from ._eopod_cli import (
 	run,
 	configure,
 	main,
+	check_background,
+	kill,
+	async_command,
 )
+
+__version__ = "0.0.1"
 
 __all__ = (
 	"show_config",
@@ -28,4 +33,7 @@ __all__ = (
 	"run",
 	"configure",
 	"main",
+	"check_background",
+	"kill",
+	"async_command",
 )

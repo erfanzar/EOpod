@@ -1,6 +1,6 @@
 # EOpod: Enhanced TPU Command Runner
 
-EOpod is a streamlined command-line tool designed to simplify and enhance the execution of commands on Google Cloud TPU VMs. It provides a user-friendly interface for running commands, managing configurations, and viewing command history, making it easier to work with TPUs in your projects.
+EOpod is a command-line tool designed to simplify and enhance interaction with Google Cloud TPU VMs. It provides real-time output streaming, background process management, and robust error handling.
 
 ## Features
 
@@ -10,107 +10,172 @@ EOpod is a streamlined command-line tool designed to simplify and enhance the ex
 * **Command History:** View a history of executed commands, their status, and truncated output.
 * **Error Logging:** Detailed error logs are maintained for debugging failed commands.
 * **Rich Output:** Utilizes the `rich` library for visually appealing and informative output in the console.
+Here's a comprehensive README.md for the project:
 
 ## Installation
-
-### Using `pip`
 
 ```bash
 pip install eopod
 ```
 
-### Using `poetry`
+## Configuration
+
+Before using EOpod, configure it with your Google Cloud credentials:
 
 ```bash
-poetry add eopod
+eopod configure --project-id YOUR_PROJECT_ID --zone YOUR_ZONE --tpu-name YOUR_TPU_NAME
 ```
 
-### From Source (using Poetry)
+## Usage Examples
 
-1. Clone the repository:
+### Basic Command Execution
 
-    ```bash
-    git clone https://github.com/erfanzar/EOpod.git
-    cd EOpod
-    ```
-
-2. Install using Poetry:
-
-    ```bash
-    poetry install
-    ```
-
-## Usage
-
-### Configuration
-
-Before using EOpod, you need to configure it with your Google Cloud project details:
+Commands are executed with real-time output streaming by default:
 
 ```bash
-eopod configure --project-id <your_project_id> --zone <your_zone> --tpu-name <your_tpu_name>
+# Simple command
+eopod run echo "Hello TPU"
+
+# Run Python script
+eopod run python train.py --batch-size 32
+
+# Complex commands with pipes and redirections
+eopod run "cat data.txt | grep error > errors.log"
+
+# Commands with multiple arguments
+eopod run ls -la /path/to/dir
 ```
 
-Replace `<your_project_id>`, `<your_zone>`, and `<your_tpu_name>` with your actual project ID, zone, and TPU name.
+### Background Processes
 
-### Running Commands
-
-You can run commands on your TPU VM using the `run` command:
+Run long-running tasks in the background:
 
 ```bash
-eopod run <command> [options]
+# Start training in background
+eopod run python long_training.py --epochs 1000 --background
+
+# Check background processes
+eopod check-background
+
+# Check specific process
+eopod check-background 12345
+
+# Kill a background process
+eopod kill 12345
+
+# Force kill if necessary
+eopod kill 12345 --force
 ```
 
-* **`<command>`:** The command to execute on the TPU VM (e.g., `ls`, `python my_script.py`, etc.).
-* **`--worker`:**  Specify the worker to run the command on (default: `all`).
-* **`--retry`:** Set the number of retries for failed commands (default: 3).
-* **`--delay`:** Set the delay in seconds between retries (default: 5).
-* **`--timeout`:** Set the command timeout in seconds (default: 300).
-* **`--interactive`:** Run the command in an interactive SSH session (experimental).
+### Worker-Specific Commands
 
-**Examples:**
-
-* Run `ls -l` on all workers:
-
-    ```bash
-    eopod run "ls -l"
-    ```
-
-* Run `python train.py` with 5 retries and a 10-second delay:
-
-    ```bash
-    eopod run "python train.py" --retry 5 --delay 10
-    ```
-
-* Run `nvidia-smi` on worker 0 with a timeout of 60 seconds:
-
-    ```bash
-    eopod run "pip install easydel" --worker 0 --timeout 60
-    ```
-
-### Viewing Command History
-
-To see a history of executed commands:
+Execute commands on specific workers:
 
 ```bash
+# Run on specific worker
+eopod run nvidia-smi --worker 0
+
+# Run on all workers (default)
+eopod run hostname --worker all
+```
+
+### Advanced Options
+
+```bash
+# Disable output streaming
+eopod run python script.py --no-stream
+
+# Set custom retry count
+eopod run python train.py --retry 5
+
+# Set custom retry delay
+eopod run python train.py --delay 10
+
+# Set custom timeout
+eopod run python train.py --timeout 600
+```
+
+### Viewing History and Logs
+
+```bash
+# View command history
 eopod history
-```
 
-This will display a table with the timestamp, command, status, and truncated output of the last 15 commands.
-
-### Viewing Error Logs
-
-To view detailed error logs:
-
-```bash
+# View error logs
 eopod errors
-```
 
-This will display a table showing the timestamp, command, and error message for recent failed commands.
-
-### Showing Configuration
-
-To see your current EOpod configuration:
-
-```bash
+# View current configuration
 eopod show-config
 ```
+
+## Command Reference
+
+### Main Commands
+
+* `run`: Execute commands on TPU VM
+
+  ```bash
+  eopod run [OPTIONS] COMMAND [ARGS]...
+  ```
+
+  Options:
+  * `--worker TEXT`: Specific worker or "all" (default: "all")
+  * `--retry INTEGER`: Number of retries for failed commands (default: 3)
+  * `--delay INTEGER`: Delay between retries in seconds (default: 5)
+  * `--timeout INTEGER`: Command timeout in seconds (default: 300)
+  * `--no-stream`: Disable output streaming
+  * `--background`: Run command in background
+
+* `configure`: Set up EOpod configuration
+
+  ```bash
+  eopod configure --project-id ID --zone ZONE --tpu-name NAME
+  ```
+
+* `status`: Check TPU status
+
+  ```bash
+  eopod status
+  ```
+
+* `check-background`: Check background processes
+
+  ```bash
+  eopod check-background [PID]
+  ```
+
+* `kill`: Kill background processes
+
+  ```bash
+  eopod kill PID [--force]
+  ```
+
+### Utility Commands
+
+* `history`: View command execution history
+* `errors`: View error logs
+* `show-config`: Display current configuration
+
+## File Locations
+
+* Configuration: `~/.eopod/config.ini`
+* Command history: `~/.eopod/history.yaml`
+* Error logs: `~/.eopod/error_log.yaml`
+* Application logs: `~/.eopod/eopod.log`
+
+## Error Handling
+
+EOpod includes built-in error handling and retry mechanisms:
+
+* Automatic retry for failed commands
+* Timeout handling
+* Detailed error logging
+* Rich error output
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+This project is licensed under the Apache License 2.0 - see the LICENSE file for details.

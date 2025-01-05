@@ -17,7 +17,6 @@ import configparser
 from functools import wraps
 import json
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -180,19 +179,25 @@ class TPUManager:
 			raise RuntimeError(f"Failed to get TPU status: {error_message}")
 
 	async def execute_command(
-		self, command: str, worker: str = "all", capture_output: bool = True
+		self,
+		command: str,
+		worker: str = "all",
+		stream: bool = False,
+		background: bool = False,
 	) -> tuple:
 		"""
 		Executes a command on the TPU VM.
 
 		Args:
-		    command: The command to execute.
-		    worker: The worker to execute the command on.
-		    capture_output: Whether to capture the output of the command.
-
-		Returns:
-		    A tuple containing the return code, stdout, and stderr.
+		    command: The command to execute
+		    worker: The worker to execute the command on
+		    stream: Whether to stream the output
+		    background: Whether to run in background (nohup-like)
 		"""
+		if background:
+			# Modify command to run in background
+			command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
+
 		cmd = [
 			"gcloud",
 			"compute",
@@ -206,64 +211,42 @@ class TPUManager:
 			f"--command={command}",
 		]
 
-		if capture_output:
+		if stream:
+			process = await asyncio.create_subprocess_exec(
+				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+			)
+
+			async def read_stream(stream, console, prefix):
+				while True:
+					line = await stream.readline()
+					if not line:
+						break
+					console.print(f"[blue]{prefix}[/blue]: {line.decode().rstrip()}")
+
+			# Create tasks for reading stdout and stderr
+			stdout_task = asyncio.create_task(read_stream(process.stdout, console, "OUT"))
+			stderr_task = asyncio.create_task(read_stream(process.stderr, console, "ERR"))
+
+			# Wait for both streams to complete
+			await asyncio.gather(stdout_task, stderr_task)
+			await process.wait()
+			return process.returncode, "", ""
+
+		elif background:
+			process = await asyncio.create_subprocess_exec(
+				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+			)
+			stdout, stderr = await process.communicate()
+			if process.returncode == 0:
+				pid = stdout.decode().strip()
+				return process.returncode, pid, stderr.decode()
+			return process.returncode, "", stderr.decode()
+		else:
 			process = await asyncio.create_subprocess_exec(
 				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
 			)
 			stdout, stderr = await process.communicate()
 			return process.returncode, stdout.decode(), stderr.decode()
-		else:
-			# Execute without capturing output (for nohup-like behavior)
-			process = await asyncio.create_subprocess_exec(*cmd)
-			return process.returncode, "", ""  # No stdout/stderr when not capturing
-
-	async def stream_command(self, command: str, worker: str = "all") -> None:
-		"""
-		Streams the output of a command from the specified worker(s).
-
-		Args:
-		    command: The command to execute and stream output from.
-		    worker: The worker to execute the command on.
-		"""
-		workers = [worker]
-		if worker == "all":
-			status = await self.get_status()
-			workers = [
-				node["networkEndpoints"][0]["ipAddress"].split(".")[3]
-				for node in status.get("nodes", [])
-			]
-
-		async def stream_worker_output(worker_id: str):
-			cmd = [
-				"gcloud",
-				"compute",
-				"tpus",
-				"tpu-vm",
-				"ssh",
-				self.tpu_name,
-				f"--zone={self.zone}",
-				f"--worker={worker_id}",
-				f"--project={self.project_id}",
-				f"--command={command}",
-			]
-
-			process = await asyncio.create_subprocess_exec(
-				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-			)
-
-			while True:
-				line = await process.stdout.readline()
-				if not line:
-					break
-				console.print(f"[bold blue][Worker {worker_id}]:[/] {line.decode().strip()}")
-
-			stderr = await process.stderr.read()
-			if stderr:
-				console.print(
-					f"[bold red][Worker {worker_id} STDERR]:[/] {stderr.decode().strip()}"
-				)
-
-		await asyncio.gather(*(stream_worker_output(w) for w in workers))
 
 
 @click.group()
@@ -289,46 +272,27 @@ def configure(project_id, zone, tpu_name):
 	console.print("[green]Configuration saved successfully![/green]")
 
 
-@cli.command()
-@click.argument("command")
+@cli.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@click.argument("cmd_args", nargs=-1, type=click.UNPROCESSED)
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@click.option("--retry", default=3, help="Number of retries for failed commands")
+@click.option("--delay", default=5, help="Delay between retries in seconds")
+@click.option("--timeout", default=300, help="Command timeout in seconds")
+@click.option("--no-stream", is_flag=True, help="Disable output streaming")
 @click.option(
-	"--worker",
-	default="all",
-	help='Specific worker or "all"',
-)
-@click.option(
-	"--retry",
-	default=3,
-	help="Number of retries for failed commands",
-)
-@click.option(
-	"--delay",
-	default=5,
-	help="Delay between retries in seconds",
-)
-@click.option(
-	"--timeout",
-	default=300,
-	help="Command timeout in seconds",
-)
-@click.option(
-	"--interactive",
-	is_flag=True,
-	help="Run command in interactive mode (experimental)",
-)
-@click.option(
-	"--stream",
-	is_flag=True,
-	help="Stream the output from the specified worker(s)",
-)
-@click.option(
-	"--nohup",
-	is_flag=True,
-	help="Run the command in the background, detached from the session",
+	"--background", is_flag=True, help="Run command in background (nohup-like)"
 )
 @async_command
-async def run(command, worker, retry, delay, timeout, interactive, stream, nohup):
+async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 	"""Run a command on TPU VM with advanced features"""
+	if not cmd_args:
+		console.print("[red]No command provided[/red]")
+		return
+
+	# Join arguments preserving quotes and spaces
+	command = " ".join(cmd_args)
+	stream = not no_stream
+
 	config = EOConfig()
 	project_id, zone, tpu_name = config.get_credentials()
 
@@ -338,50 +302,14 @@ async def run(command, worker, retry, delay, timeout, interactive, stream, nohup
 
 	tpu = TPUManager(project_id, zone, tpu_name)
 
-	if interactive:
-		console.print(
-			"[yellow]Interactive mode is experimental. Use with caution.[/yellow]"
-		)
-		cmd = [
-			"gcloud",
-			"compute",
-			"tpus",
-			"tpu-vm",
-			"ssh",
-			tpu_name,
-			f"--zone={zone}",
-			f"--worker={worker}",
-			f"--project={project_id}",
-		]
-		# Start an interactive process (no command specified)
-		process = await asyncio.create_subprocess_exec(*cmd)
-		await process.wait()  # Wait for the process to complete
-		return
-
-	if stream:
-		await tpu.stream_command(command, worker)
-		return
-
-	if nohup:
-		# Wrap the command with nohup and redirect output/errors to files
-		nohup_command = f"nohup {command} > {tpu_name}_{worker}_output.log 2> {tpu_name}_{worker}_error.log &"
-		returncode, _, _ = await tpu.execute_command(
-			nohup_command, worker, capture_output=False
-		)
-		if returncode == 0:
-			console.print(
-				f"[green]Command '{command}' started in the background on worker(s) {worker}. "
-				f"Output and errors redirected to {tpu_name}_{worker}_output.log and {tpu_name}_{worker}_error.log[/green]"
-			)
-		else:
-			console.print(
-				f"[red]Failed to start command in the background on worker(s) {worker}.[/red]"
-			)
-		return
+	start_time = datetime.now()
+	console.print(f"[cyan]Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}[/cyan]")
+	console.print(f"[cyan]Executing: {command}[/cyan]")
 
 	with Progress(
 		SpinnerColumn(),
 		TextColumn("[progress.description]{task.description}"),
+		disable=stream,  # Disable progress bar when streaming
 	) as progress:
 		task = progress.add_task(
 			description=f"Executing command: {command} (Attempt 1)", total=None
@@ -389,26 +317,65 @@ async def run(command, worker, retry, delay, timeout, interactive, stream, nohup
 
 		for attempt in range(1, retry + 1):
 			try:
-				returncode, stdout, stderr = await asyncio.wait_for(
-					tpu.execute_command(command, worker), timeout=timeout
-				)
+				if background:
+					# Add more detailed background process handling
+					background_cmd = (
+						f"nohup {command} > /tmp/nohup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.out "
+						"2>&1 & echo $!"
+					)
+					returncode, pid, stderr = await asyncio.wait_for(
+						tpu.execute_command(background_cmd, worker, stream=False, background=True),
+						timeout=timeout,
+					)
+					if returncode == 0:
+						console.print(
+							f"[green]Command started in background with PID: {pid}[/green]"
+						)
+						console.print("[green]Output will be saved to /tmp/nohup_*.out[/green]")
+						config.save_command_history(command, "background", f"PID: {pid}")
 
-				if returncode == 0:
-					progress.update(
-						task,
-						description="[green]Command completed successfully![/green]",
-					)
-					console.print("\nOutput:")
-					console.print(stdout)
-					config.save_command_history(command, "success", stdout)
-					break
+						# Show how to check the process
+						console.print("\n[yellow]To check process status:[/yellow]")
+						console.print(f"eopod check-background {pid}")
+						break
 				else:
-					progress.update(
-						task,
-						description=f"[red]Attempt {attempt} failed:[/red] {stderr[:100]}...",
+					returncode, stdout, stderr = await asyncio.wait_for(
+						tpu.execute_command(command, worker, stream=stream, background=False),
+						timeout=timeout,
 					)
-					console.print(f"[red]Attempt {attempt} failed:[/red] {stderr}")
-					config.save_error_log(command, stderr)
+
+					if returncode == 0:
+						if not stream:
+							progress.update(
+								task,
+								description="[green]Command completed successfully![/green]",
+							)
+							console.print("\nOutput:")
+							console.print(stdout)
+						else:
+							console.print("[green]Command completed successfully![/green]")
+
+						# Add command completion timestamp
+						end_time = datetime.now()
+						duration = end_time - start_time
+						console.print(
+							f"[cyan]Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}[/cyan]"
+						)
+						console.print(f"[cyan]Duration: {duration}[/cyan]")
+
+						config.save_command_history(
+							command,
+							"success",
+							stdout if not stream else "Streamed output",
+						)
+						break
+					else:
+						progress.update(
+							task,
+							description=f"[red]Attempt {attempt} failed:[/red] {stderr[:100]}...",
+						)
+						console.print(f"[red]Attempt {attempt} failed:[/red] {stderr}")
+						config.save_error_log(command, stderr)
 
 			except asyncio.TimeoutError:
 				progress.update(
@@ -422,7 +389,8 @@ async def run(command, worker, retry, delay, timeout, interactive, stream, nohup
 
 			except Exception as e:
 				progress.update(
-					task, description=f"[red]Error (attempt {attempt}):[/red] {str(e)}"
+					task,
+					description=f"[red]Error (attempt {attempt}):[/red] {str(e)}",
 				)
 				console.print(f"[red]Error (attempt {attempt}):[/red] {str(e)}")
 				config.save_error_log(command, str(e))
@@ -431,14 +399,75 @@ async def run(command, worker, retry, delay, timeout, interactive, stream, nohup
 			if attempt < retry:
 				progress.update(
 					task,
-					description=f"Executing command: {command} (Attempt {attempt + 1})",
+					description=f"Retrying command in {delay} seconds... (Attempt {attempt + 1}/{retry})",
 				)
-				time.sleep(delay)
+				await asyncio.sleep(delay)
 			else:
 				progress.update(
 					task,
 					description=f"[red]Command failed after {retry} attempts[/red]",
 				)
+
+
+@cli.command()
+@click.argument("pid_args", nargs=-1)
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@async_command
+async def check_background(pid_args, worker):
+	"""Check status of background processes"""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	tpu = TPUManager(project_id, zone, tpu_name)
+
+	if pid_args:
+		pids = " ".join(pid_args)
+		command = f"ps -p {pids} -f"
+	else:
+		command = "ps aux | grep nohup"
+
+	returncode, stdout, stderr = await tpu.execute_command(command, worker)
+
+	if returncode == 0:
+		console.print("[green]Background Processes:[/green]")
+		console.print(stdout)
+	else:
+		console.print(f"[red]Error checking background processes:[/red] {stderr}")
+
+
+# Add a command to kill background processes
+@cli.command()
+@click.argument("pid_args", nargs=-1, required=True)
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@click.option("--force", is_flag=True, help="Force kill the process")
+@async_command
+async def kill(pid_args, worker, force):
+	"""Kill a background process"""
+	pids = " ".join(pid_args)
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	tpu = TPUManager(project_id, zone, tpu_name)
+
+	signal = "-9" if force else "-15"
+	command = f"kill {signal} {pids}"
+
+	returncode, stdout, stderr = await tpu.execute_command(command, worker)
+
+	if returncode == 0:
+		console.print(
+			f"[green]Successfully {'force ' if force else ''}killed process(es) {pids}[/green]"
+		)
+	else:
+		console.print(f"[red]Error killing process(es):[/red] {stderr}")
 
 
 @cli.command()

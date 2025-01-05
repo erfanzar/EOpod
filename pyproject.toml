@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "eopod"
-version = "0.0.0"
+version = "0.0.1"
 
 description = "EOpod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
@@ -26,7 +26,7 @@ classifiers = [
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.14"
-click = "^8.0"  
+click = "^8.0"
 rich = "^13.7.0"
 pyyaml = "^6.0.1"
 
