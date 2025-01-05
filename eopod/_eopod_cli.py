@@ -51,6 +51,7 @@ def async_command(fn):
 	@wraps(fn)
 	def wrapper(*args, **kwargs):
 		return asyncio.run(fn(*args, **kwargs))
+
 	return wrapper
 
 
@@ -127,16 +128,21 @@ class EOConfig:
 		error_log = []
 		if self.error_log_file.exists():
 			with open(self.error_log_file, "r") as f:
-				error_log = yaml.safe_load(f) or []
+				try:
+					error_log = yaml.safe_load(f) or []
+				except yaml.YAMLError as e:
+					console.print(f"[red]Error loading error log: {e}[/red]")
+					error_log = []
 
 		error_log.append(
 			{
-				"timestamp": datetime.now().isoformat(),
+				"timestamp": datetime.now().isoformat(),  # Add timestamp here
 				"command": command,
 				"error": error,
 			}
 		)
 
+		# Keep only last 50 errors
 		error_log = error_log[-50:]
 
 		with open(self.error_log_file, "w") as f:
@@ -220,15 +226,42 @@ def configure(project_id, zone, tpu_name):
 
 @cli.command()
 @click.argument("command")
-@click.option("--worker", default="all", help='Specific worker or "all"')
-@click.option("--retry", default=3, help="Number of retries for failed commands")
-@click.option("--delay", default=5, help="Delay between retries in seconds")
-@click.option("--timeout", default=300, help="Command timeout in seconds")
 @click.option(
-	"--interactive", is_flag=True, help="Run command in interactive mode (experimental)"
+	"--worker",
+	default="all",
+	help='Specific worker or "all"',
 )
-@async_command
-async def run(command, worker, retry, delay, timeout, interactive):
+@click.option(
+	"--retry",
+	default=3,
+	help="Number of retries for failed commands",
+)
+@click.option(
+	"--delay",
+	default=5,
+	help="Delay between retries in seconds",
+)
+@click.option(
+	"--timeout",
+	default=300,
+	help="Command timeout in seconds",
+)
+@click.option(
+	"--interactive",
+	is_flag=True,
+	help="Run command in interactive mode (experimental)",
+)
+@click.option(
+	"--stream",
+	is_flag=True,
+	help="Stream the output from the specified worker(s)",
+)
+@click.option(
+	"--nohup",
+	is_flag=True,
+	help="Run the command in the background, detached from the session",
+)
+async def run(command, worker, retry, delay, timeout, interactive, stream, nohup):
 	"""Run a command on TPU VM with advanced features"""
 	config = EOConfig()
 	project_id, zone, tpu_name = config.get_credentials()
@@ -254,9 +287,30 @@ async def run(command, worker, retry, delay, timeout, interactive):
 			f"--worker={worker}",
 			f"--project={project_id}",
 		]
-
+		# Start an interactive process (no command specified)
 		process = await asyncio.create_subprocess_exec(*cmd)
-		await process.wait()
+		await process.wait()  # Wait for the process to complete
+		return
+
+	if stream:
+		await tpu.stream_command(command, worker)
+		return
+
+	if nohup:
+		# Wrap the command with nohup and redirect output/errors to files
+		nohup_command = f"nohup {command} > {tpu_name}_{worker}_output.log 2> {tpu_name}_{worker}_error.log &"
+		returncode, _, _ = await tpu.execute_command(
+			nohup_command, worker, capture_output=False
+		)
+		if returncode == 0:
+			console.print(
+				f"[green]Command '{command}' started in the background on worker(s) {worker}. "
+				f"Output and errors redirected to {tpu_name}_{worker}_output.log and {tpu_name}_{worker}_error.log[/green]"
+			)
+		else:
+			console.print(
+				f"[red]Failed to start command in the background on worker(s) {worker}.[/red]"
+			)
 		return
 
 	with Progress(
@@ -264,8 +318,7 @@ async def run(command, worker, retry, delay, timeout, interactive):
 		TextColumn("[progress.description]{task.description}"),
 	) as progress:
 		task = progress.add_task(
-			description=f"Executing command: {command} (Attempt 1)",
-			total=None,
+			description=f"Executing command: {command} (Attempt 1)", total=None
 		)
 
 		for attempt in range(1, retry + 1):
@@ -389,7 +442,11 @@ def errors():
 		return
 
 	with open(config.error_log_file, "r") as f:
-		error_log = yaml.safe_load(f) or []
+		try:
+			error_log = yaml.safe_load(f) or []
+		except yaml.YAMLError as e:
+			console.print(f"[red]Error loading error log: {e}[/red]")
+			return
 
 	table = Table(title="Error Log", style="red")
 	table.add_column("Timestamp")
