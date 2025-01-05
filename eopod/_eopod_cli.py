@@ -179,7 +179,20 @@ class TPUManager:
 			logging.error(f"Failed to get TPU status: {error_message}")
 			raise RuntimeError(f"Failed to get TPU status: {error_message}")
 
-	async def execute_command(self, command: str, worker: str = "all") -> tuple:
+	async def execute_command(
+		self, command: str, worker: str = "all", capture_output: bool = True
+	) -> tuple:
+		"""
+		Executes a command on the TPU VM.
+
+		Args:
+		    command: The command to execute.
+		    worker: The worker to execute the command on.
+		    capture_output: Whether to capture the output of the command.
+
+		Returns:
+		    A tuple containing the return code, stdout, and stderr.
+		"""
 		cmd = [
 			"gcloud",
 			"compute",
@@ -193,12 +206,64 @@ class TPUManager:
 			f"--command={command}",
 		]
 
-		process = await asyncio.create_subprocess_exec(
-			*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-		)
+		if capture_output:
+			process = await asyncio.create_subprocess_exec(
+				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+			)
+			stdout, stderr = await process.communicate()
+			return process.returncode, stdout.decode(), stderr.decode()
+		else:
+			# Execute without capturing output (for nohup-like behavior)
+			process = await asyncio.create_subprocess_exec(*cmd)
+			return process.returncode, "", ""  # No stdout/stderr when not capturing
 
-		stdout, stderr = await process.communicate()
-		return process.returncode, stdout.decode(), stderr.decode()
+	async def stream_command(self, command: str, worker: str = "all") -> None:
+		"""
+		Streams the output of a command from the specified worker(s).
+
+		Args:
+		    command: The command to execute and stream output from.
+		    worker: The worker to execute the command on.
+		"""
+		workers = [worker]
+		if worker == "all":
+			status = await self.get_status()
+			workers = [
+				node["networkEndpoints"][0]["ipAddress"].split(".")[3]
+				for node in status.get("nodes", [])
+			]
+
+		async def stream_worker_output(worker_id: str):
+			cmd = [
+				"gcloud",
+				"compute",
+				"tpus",
+				"tpu-vm",
+				"ssh",
+				self.tpu_name,
+				f"--zone={self.zone}",
+				f"--worker={worker_id}",
+				f"--project={self.project_id}",
+				f"--command={command}",
+			]
+
+			process = await asyncio.create_subprocess_exec(
+				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+			)
+
+			while True:
+				line = await process.stdout.readline()
+				if not line:
+					break
+				console.print(f"[bold blue][Worker {worker_id}]:[/] {line.decode().strip()}")
+
+			stderr = await process.stderr.read()
+			if stderr:
+				console.print(
+					f"[bold red][Worker {worker_id} STDERR]:[/] {stderr.decode().strip()}"
+				)
+
+		await asyncio.gather(*(stream_worker_output(w) for w in workers))
 
 
 @click.group()
