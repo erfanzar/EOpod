@@ -14,6 +14,7 @@
 
 import asyncio
 import configparser
+from functools import wraps
 import json
 import logging
 import time
@@ -29,6 +30,28 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 console = Console()
+
+
+class AsyncContext:
+	def __init__(self, delay):
+		self.delay = delay
+
+	async def __aenter__(self):
+		await asyncio.sleep(self.delay)
+		return self.delay
+
+	async def __aexit__(self, exc_type, exc, tb):
+		await asyncio.sleep(self.delay)
+
+
+TestAsyncContext = AsyncContext
+
+
+def async_command(fn):
+	@wraps(fn)
+	def wrapper(*args, **kwargs):
+		return asyncio.run(fn(*args, **kwargs))
+	return wrapper
 
 
 class EOConfig:
@@ -204,6 +227,7 @@ def configure(project_id, zone, tpu_name):
 @click.option(
 	"--interactive", is_flag=True, help="Run command in interactive mode (experimental)"
 )
+@async_command
 async def run(command, worker, retry, delay, timeout, interactive):
 	"""Run a command on TPU VM with advanced features"""
 	config = EOConfig()
@@ -299,6 +323,37 @@ async def run(command, worker, retry, delay, timeout, interactive):
 
 
 @cli.command()
+@async_command
+async def status():
+	"""Show TPU status and information"""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	try:
+		tpu = TPUManager(project_id, zone, tpu_name)
+		status = await tpu.get_status()
+
+		table = Table(title="TPU Status")
+		table.add_column("Property")
+		table.add_column("Value")
+
+		table.add_row("Name", status.get("name", ""))
+		table.add_row("State", status.get("state", ""))
+		table.add_row("Type", status.get("acceleratorType", ""))
+		table.add_row("Network", status.get("network", ""))
+		table.add_row("API Version", status.get("apiVersion", ""))
+
+		console.print(table)
+
+	except RuntimeError as e:
+		console.print(f"[red]{e}[/red]")
+
+
+@cli.command()
 def history():
 	"""Show command execution history"""
 	config = EOConfig()
@@ -374,7 +429,7 @@ def main():
 	Main entry point for the EOpod CLI.
 	"""
 	try:
-		cli()
+		asyncio.run(cli())
 	except click.exceptions.Exit as e:
 		if e.exit_code != 0:
 			console.print(f"[red]Error:[/red] Command failed with exit code {e.exit_code}")
