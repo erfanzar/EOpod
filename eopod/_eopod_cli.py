@@ -127,17 +127,8 @@ class TPUManager:
 				)
 
 				async def read_stream(stream, is_stderr=False):
-					last_line = ""
-					while True:
-						line = await stream.readline()
-						if not line:
-							break
-						decoded_line = line.decode()
-
-						if last_line:
-							console.print()  # New line after progress bar
-							last_line = ""
-						console.print(decoded_line.rstrip())
+					async for line in stream:
+						console.print(line.decode().rstrip())
 
 				stdout_task = asyncio.create_task(read_stream(process.stdout))
 				stderr_task = asyncio.create_task(read_stream(process.stderr, True))
