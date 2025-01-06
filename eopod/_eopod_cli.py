@@ -226,7 +226,7 @@ class TPUManager:
 						line = await stream.readline()
 						if not line:
 							break
-						console.print(line.decode().rstrip(), end="")
+						console.print(line.decode().strip())
 					except Exception:
 						...
 
