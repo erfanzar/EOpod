@@ -10,7 +10,6 @@ EOpod is a command-line tool designed to simplify and enhance interaction with G
 * **Command History:** View a history of executed commands, their status, and truncated output.
 * **Error Logging:** Detailed error logs are maintained for debugging failed commands.
 * **Rich Output:** Utilizes the `rich` library for visually appealing and informative output in the console.
-Here's a comprehensive README.md for the project:
 
 ## Installation
 
