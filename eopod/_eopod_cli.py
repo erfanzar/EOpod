@@ -40,7 +40,7 @@ class TPUManager:
 		self.tpu_name = tpu_name
 		self._connections = {}
 
-	def _get_host(self, worker: int) -> str:
+	def get_status(self, worker: int) -> str:
 		cmd = [
 			"gcloud",
 			"compute",
@@ -58,27 +58,32 @@ class TPUManager:
 
 	def get_connection(self, worker: int = 0) -> Connection:
 		if worker not in self._connections:
-			host = self._get_host(worker)
+			host = self.get_status(worker)
 			self._connections[worker] = Connection(
 				host=host,
-				user="your_username",  # Configure as needed
-				connect_kwargs={
-					"key_filename": "~/.ssh/google_compute_engine"  # Default GCP key
-				},
+				user="your_username",
+				connect_kwargs={"key_filename": "~/.ssh/google_compute_engine"},
 			)
 		return self._connections[worker]
 
-	async def execute_command(self, command: str, worker: int = 0, stream: bool = False):
+	async def execute_command(
+		self, command: str, worker: int = 0, stream: bool = False, background: bool = False
+	):
 		conn = self.get_connection(worker)
 
+		if background:
+			command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
+
 		loop = asyncio.get_event_loop()
-		if stream:
+		if stream and not background:
 			return await loop.run_in_executor(
-				None, functools.partial(conn.run, command, hide=False, pty=True)
+				None,
+				functools.partial(conn.run, command, hide=False, pty=True),
 			)
 
 		return await loop.run_in_executor(
-			None, functools.partial(conn.run, command, hide=True)
+			None,
+			functools.partial(conn.run, command, hide=True),
 		)
 
 	def __del__(self):
@@ -583,7 +588,7 @@ async def status():
 
 	try:
 		tpu = TPUManager(project_id, zone, tpu_name)
-		status = await tpu.get_status()
+		status = tpu.get_status()
 
 		table = Table(title="TPU Status")
 		table.add_column("Property")
@@ -664,7 +669,7 @@ async def kill_tpu(worker, force, pid):
 
 		try:
 			# Get TPU status to determine number of workers
-			status = await tpu.get_status()
+			status = tpu.get_status()
 
 			# Extract worker count from TPU status
 			worker_count = 1  # Default to 1 for single TPU
@@ -778,7 +783,7 @@ async def kill_tpu(worker, force, pid):
 
 			# Verify TPU status
 			progress.update(task, description="Verifying TPU status...")
-			final_status = await tpu.get_status()
+			final_status = tpu.get_status()
 			console.print(
 				f"[blue]Current TPU Status: {final_status.get('state', 'Unknown')}[/blue]"
 			)
