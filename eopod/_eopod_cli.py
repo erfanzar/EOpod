@@ -27,11 +27,17 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.progress import TimeElapsedColumn
 from rich.theme import Theme
 
 console = Console(
 	theme=Theme(
-		{"info": "cyan", "warning": "yellow", "error": "white", "success": "green"}
+		{
+			"info": "cyan",
+			"warning": "yellow",
+			"error": "white",
+			"success": "green",
+		}
 	)
 )
 
@@ -49,6 +55,7 @@ class TPUManager:
 		self.zone = zone
 		self.tpu_name = tpu_name
 		self.logger = logger
+		self.last_tqdm_line = ""
 
 	async def get_status(self) -> dict:
 		cmd = [
@@ -62,6 +69,7 @@ class TPUManager:
 			"--format=json",
 		]
 
+		self.logger.info("Fetching TPU status...")
 		process = await asyncio.create_subprocess_exec(
 			*cmd,
 			stdout=asyncio.subprocess.PIPE,
@@ -70,7 +78,9 @@ class TPUManager:
 
 		stdout, stderr = await process.communicate()
 		if process.returncode == 0:
-			return json.loads(stdout)
+			status = json.loads(stdout)
+			self.logger.info(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
+			return status
 		else:
 			error_message = stderr.decode()
 			self.logger.error(f"Failed to get TPU status: {error_message}")
@@ -99,25 +109,50 @@ class TPUManager:
 			f"--command={command}",
 		]
 
+		self.logger.info(f"Executing command on worker {worker}: [info]{command}[/]")
+
 		if stream:
-			process = await asyncio.create_subprocess_exec(
-				*cmd,
-				stdout=asyncio.subprocess.PIPE,
-				stderr=asyncio.subprocess.PIPE,
-			)
+			with Progress(
+				SpinnerColumn(),
+				TextColumn("[progress.description]{task.description}"),
+				TimeElapsedColumn(),
+				console=console,
+			) as progress:
+				task = progress.add_task("Running command...", total=None)
 
-			async def read_stream(stream):
-				while True:
-					line = await stream.readline()
-					if not line:
-						break
-					print(line.decode(), end="", flush=True)
+				process = await asyncio.create_subprocess_exec(
+					*cmd,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE,
+				)
 
-			stdout_task = asyncio.create_task(read_stream(process.stdout))
-			stderr_task = asyncio.create_task(read_stream(process.stderr))
+				async def read_stream(stream, is_stderr=False):
+					last_line = ""
+					while True:
+						line = await stream.readline()
+						if not line:
+							break
+						decoded_line = line.decode()
 
-			await asyncio.gather(stdout_task, stderr_task)
-			return await process.wait(), "", ""
+						if last_line:
+							console.print()  # New line after progress bar
+							last_line = ""
+						console.print(decoded_line.rstrip())
+
+				stdout_task = asyncio.create_task(read_stream(process.stdout))
+				stderr_task = asyncio.create_task(read_stream(process.stderr, True))
+
+				await asyncio.gather(stdout_task, stderr_task)
+				exit_code = await process.wait()
+
+				if exit_code == 0:
+					progress.update(
+						task, description="[success]Command completed successfully[/]"
+					)
+				else:
+					progress.update(task, description="[error]Command failed[/]")
+
+				return exit_code, "", ""
 		else:
 			process = await asyncio.create_subprocess_exec(
 				*cmd,
@@ -129,9 +164,14 @@ class TPUManager:
 			if process.returncode == 0:
 				if background:
 					pid = stdout.decode().strip()
+					self.logger.info(f"Background process started with PID: [success]{pid}[/]")
 					return process.returncode, pid, stderr.decode()
+				else:
+					self.logger.info("[success]Command completed successfully[/]")
+					return process.returncode, stdout.decode(), stderr.decode()
+			else:
+				self.logger.error(f"Command failed: {stderr.decode()}")
 				return process.returncode, stdout.decode(), stderr.decode()
-			return process.returncode, stdout.decode(), stderr.decode()
 
 
 class AsyncContext:
