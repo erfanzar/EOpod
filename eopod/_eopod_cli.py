@@ -14,21 +14,77 @@
 
 import asyncio
 import configparser
-from functools import wraps
+import functools
 import json
 import logging
+import subprocess
 from datetime import datetime
-from pathlib import Path
+from functools import wraps
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import click
 import yaml
+from fabric import Connection
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
-from rich.progress import TimeElapsedColumn
 from rich.theme import Theme
+
+
+class TPUManager:
+	def __init__(self, project_id: str, zone: str, tpu_name: str):
+		self.project_id = project_id
+		self.zone = zone
+		self.tpu_name = tpu_name
+		self._connections = {}
+
+	def _get_host(self, worker: int) -> str:
+		cmd = [
+			"gcloud",
+			"compute",
+			"tpus",
+			"tpu-vm",
+			"describe",
+			self.tpu_name,
+			f"--zone={self.zone}",
+			f"--project={self.project_id}",
+			"--format=json",
+		]
+		result = subprocess.run(cmd, capture_output=True, text=True)
+		data = json.loads(result.stdout)
+		return data["networkEndpoints"][worker]["accessConfig"]["externalIp"]
+
+	def get_connection(self, worker: int = 0) -> Connection:
+		if worker not in self._connections:
+			host = self._get_host(worker)
+			self._connections[worker] = Connection(
+				host=host,
+				user="your_username",  # Configure as needed
+				connect_kwargs={
+					"key_filename": "~/.ssh/google_compute_engine"  # Default GCP key
+				},
+			)
+		return self._connections[worker]
+
+	async def execute_command(self, command: str, worker: int = 0, stream: bool = False):
+		conn = self.get_connection(worker)
+
+		loop = asyncio.get_event_loop()
+		if stream:
+			return await loop.run_in_executor(
+				None, functools.partial(conn.run, command, hide=False, pty=True)
+			)
+
+		return await loop.run_in_executor(
+			None, functools.partial(conn.run, command, hide=True)
+		)
+
+	def __del__(self):
+		for conn in self._connections.values():
+			conn.close()
+
 
 console = Console(
 	theme=Theme(
@@ -49,7 +105,7 @@ logging.basicConfig(
 logger = logging.getLogger("tpu_manager")
 
 
-class TPUManager:
+class OLDTPUManager:
 	def __init__(self, project_id: str, zone: str, tpu_name: str):
 		self.project_id = project_id
 		self.zone = zone

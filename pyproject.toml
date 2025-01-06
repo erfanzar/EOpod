@@ -29,6 +29,7 @@ python = ">=3.10,<3.14"
 click = "^8.0"
 rich = "^13.7.0"
 pyyaml = "^6.0.1"
+fabric = "*"
 
 [tool.poetry.scripts]
 eopod = "eopod:main"
