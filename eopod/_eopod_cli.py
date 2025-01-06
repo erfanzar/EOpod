@@ -14,82 +14,21 @@
 
 import asyncio
 import configparser
-import functools
 import json
 import logging
-import subprocess
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import os
 
 import click
 import yaml
-from fabric import Connection
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.theme import Theme
-
-
-class TPUManager:
-	def __init__(self, project_id: str, zone: str, tpu_name: str):
-		self.project_id = project_id
-		self.zone = zone
-		self.tpu_name = tpu_name
-		self._connections = {}
-
-	def get_status(self, worker: int) -> str:
-		cmd = [
-			"gcloud",
-			"compute",
-			"tpus",
-			"tpu-vm",
-			"describe",
-			self.tpu_name,
-			f"--zone={self.zone}",
-			f"--project={self.project_id}",
-			"--format=json",
-		]
-		result = subprocess.run(cmd, capture_output=True, text=True)
-		data = json.loads(result.stdout)
-		return data["networkEndpoints"][worker]["accessConfig"]["externalIp"]
-
-	def get_connection(self, worker: int = 0) -> Connection:
-		if worker not in self._connections:
-			host = self.get_status(worker)
-			self._connections[worker] = Connection(
-				host=host,
-				user="your_username",
-				connect_kwargs={"key_filename": "~/.ssh/google_compute_engine"},
-			)
-		return self._connections[worker]
-
-	async def execute_command(
-		self, command: str, worker: int = 0, stream: bool = False, background: bool = False
-	):
-		conn = self.get_connection(worker)
-
-		if background:
-			command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
-
-		loop = asyncio.get_event_loop()
-		if stream and not background:
-			return await loop.run_in_executor(
-				None,
-				functools.partial(conn.run, command, hide=False, pty=True),
-			)
-
-		return await loop.run_in_executor(
-			None,
-			functools.partial(conn.run, command, hide=True),
-		)
-
-	def __del__(self):
-		for conn in self._connections.values():
-			conn.close()
-
 
 console = Console(
 	theme=Theme(
@@ -107,16 +46,56 @@ logging.basicConfig(
 	format="%(message)s",
 	handlers=[RichHandler(console=console, rich_tracebacks=True)],
 )
-logger = logging.getLogger("tpu_manager")
 
 
-class OLDTPUManager:
+def list2cmdline(seq):
+	result = []
+	needquote = False
+	for arg in map(os.fsdecode, seq):
+		bs_buf = []
+		if result:
+			result.append(" ")
+		needquote = (" " in arg) or ("\t" in arg) or not arg
+		if needquote:
+			result.append('"')
+		for c in arg:
+			if c == "\\":
+				bs_buf.append(c)
+			elif c == '"':
+				result.append("\\" * len(bs_buf) * 2)
+				bs_buf = []
+				result.append('\\"')
+			else:
+				if bs_buf:
+					result.extend(bs_buf)
+					bs_buf = []
+				result.append(c)
+		if bs_buf:
+			result.extend(bs_buf)
+		if needquote:
+			result.extend(bs_buf)
+			result.append('"')
+	return "".join(result)
+
+
+def clean_tqdm_output(line: str) -> str:
+	"""Clean up TQDM progress bar output to show only the latest state."""
+	if "\r" in line:
+		# Take only the last progress bar update
+		return line.rstrip().split("\r")[-1]
+	return line.rstrip()
+
+
+def is_tqdm_line(line: str) -> bool:
+	"""Check if a line contains TQDM progress bar."""
+	return "%|" in line and "it/s]" in line
+
+
+class TPUManager:
 	def __init__(self, project_id: str, zone: str, tpu_name: str):
 		self.project_id = project_id
 		self.zone = zone
 		self.tpu_name = tpu_name
-		self.logger = logger
-		self.last_tqdm_line = ""
 
 	async def get_status(self) -> dict:
 		cmd = [
@@ -130,7 +109,7 @@ class OLDTPUManager:
 			"--format=json",
 		]
 
-		self.logger.info("Fetching TPU status...")
+		console.print("[yellow]Fetching TPU status...[/yellow]")
 		process = await asyncio.create_subprocess_exec(
 			*cmd,
 			stdout=asyncio.subprocess.PIPE,
@@ -140,11 +119,11 @@ class OLDTPUManager:
 		stdout, stderr = await process.communicate()
 		if process.returncode == 0:
 			status = json.loads(stdout)
-			self.logger.info(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
+			console.print(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
 			return status
 		else:
 			error_message = stderr.decode()
-			self.logger.error(f"Failed to get TPU status: {error_message}")
+			console.print(f"[red]Failed to get TPU status[/]: {error_message}")
 			raise RuntimeError(f"Failed to get TPU status: {error_message}")
 
 	async def execute_command(
@@ -170,8 +149,7 @@ class OLDTPUManager:
 			f"--command={command}",
 		]
 
-		self.logger.info(f"Executing command on worker {worker}: [info]{command}[/]")
-
+		console.print(f"Executing command on worker {worker}: [info]{command}[/]")
 		if stream:
 			with Progress(
 				SpinnerColumn(),
@@ -179,30 +157,11 @@ class OLDTPUManager:
 				TimeElapsedColumn(),
 				console=console,
 			) as progress:
-				task = progress.add_task("Running command...", total=None)
-
-				process = await asyncio.create_subprocess_exec(
-					*cmd,
-					stdout=asyncio.subprocess.PIPE,
-					stderr=asyncio.subprocess.PIPE,
-				)
-
-				async def read_stream(stream, is_stderr=False):
-					async for line in stream:
-						console.print(line.decode().rstrip())
-
-				stdout_task = asyncio.create_task(read_stream(process.stdout))
-				stderr_task = asyncio.create_task(read_stream(process.stderr, True))
-
-				await asyncio.gather(stdout_task, stderr_task)
-				exit_code = await process.wait()
-
+				exit_code = os.system(list2cmdline(cmd))
 				if exit_code == 0:
-					progress.update(
-						task, description="[success]Command completed successfully[/]"
-					)
+					progress.print("[blue]Command completed successfully[/]")
 				else:
-					progress.update(task, description="[error]Command failed[/]")
+					progress.print("[red]Command failed[/]")
 
 				return exit_code, "", ""
 		else:
@@ -216,13 +175,13 @@ class OLDTPUManager:
 			if process.returncode == 0:
 				if background:
 					pid = stdout.decode().strip()
-					self.logger.info(f"Background process started with PID: [success]{pid}[/]")
+					console.print(f"Background process started with PID: [success]{pid}[/]")
 					return process.returncode, pid, stderr.decode()
 				else:
-					self.logger.info("[success]Command completed successfully[/]")
+					console.print("[success]Command completed successfully[/]")
 					return process.returncode, stdout.decode(), stderr.decode()
 			else:
-				self.logger.error(f"Command failed: {stderr.decode()}")
+				console.print(f"[red]Command failed: {stderr.decode()}[/]")
 				return process.returncode, stdout.decode(), stderr.decode()
 
 
@@ -588,7 +547,7 @@ async def status():
 
 	try:
 		tpu = TPUManager(project_id, zone, tpu_name)
-		status = tpu.get_status()
+		status = await tpu.get_status()
 
 		table = Table(title="TPU Status")
 		table.add_column("Property")
@@ -669,7 +628,7 @@ async def kill_tpu(worker, force, pid):
 
 		try:
 			# Get TPU status to determine number of workers
-			status = tpu.get_status()
+			status = await tpu.get_status()
 
 			# Extract worker count from TPU status
 			worker_count = 1  # Default to 1 for single TPU
@@ -783,7 +742,7 @@ async def kill_tpu(worker, force, pid):
 
 			# Verify TPU status
 			progress.update(task, description="Verifying TPU status...")
-			final_status = tpu.get_status()
+			final_status = await tpu.get_status()
 			console.print(
 				f"[blue]Current TPU Status: {final_status.get('state', 'Unknown')}[/blue]"
 			)
