@@ -240,16 +240,9 @@ class TPUManager:
 					"ERR",
 				)
 			)
-			stdin_task = asyncio.create_task(
-				read_stream(
-					process.stdin,
-					console,
-					"IN",
-				)
-			)
 
 			# Wait for both streams to complete
-			await asyncio.gather(stdout_task, stderr_task, stdin_task)
+			await asyncio.gather(stdout_task, stderr_task)
 			await process.wait()
 			return process.returncode, "", ""
 
