@@ -30,7 +30,169 @@ from rich.table import Table
 from rich.progress import TimeElapsedColumn
 from rich.theme import Theme
 
-console = Console()
+console = Console(
+	theme=Theme(
+		{
+			"info": "cyan",
+			"warning": "yellow",
+			"error": "white",
+			"success": "green",
+		}
+	)
+)
+
+logging.basicConfig(
+	level=logging.INFO,
+	format="%(message)s",
+	handlers=[RichHandler(console=console, rich_tracebacks=True)],
+)
+logger = logging.getLogger("tpu_manager")
+
+
+def clean_tqdm_output(line: str) -> str:
+	"""Clean up TQDM progress bar output to show only the latest state."""
+	if "\r" in line:
+		# Take only the last progress bar update
+		return line.rstrip().split("\r")[-1]
+	return line.rstrip()
+
+
+def is_tqdm_line(line: str) -> bool:
+	"""Check if a line contains TQDM progress bar."""
+	return "%|" in line and "it/s]" in line
+
+
+class TPUManager:
+	def __init__(self, project_id: str, zone: str, tpu_name: str):
+		self.project_id = project_id
+		self.zone = zone
+		self.tpu_name = tpu_name
+		self.logger = logger
+		self.last_tqdm_line = ""
+
+	async def get_status(self) -> dict:
+		cmd = [
+			"gcloud",
+			"compute",
+			"tpus",
+			"describe",
+			self.tpu_name,
+			f"--zone={self.zone}",
+			f"--project={self.project_id}",
+			"--format=json",
+		]
+
+		self.logger.info("Fetching TPU status...")
+		process = await asyncio.create_subprocess_exec(
+			*cmd,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.PIPE,
+		)
+
+		stdout, stderr = await process.communicate()
+		if process.returncode == 0:
+			status = json.loads(stdout)
+			self.logger.info(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
+			return status
+		else:
+			error_message = stderr.decode()
+			self.logger.error(f"Failed to get TPU status: {error_message}")
+			raise RuntimeError(f"Failed to get TPU status: {error_message}")
+
+	async def execute_command(
+		self,
+		command: str,
+		worker: str = "all",
+		stream: bool = False,
+		background: bool = False,
+	) -> tuple:
+		if background:
+			command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
+
+		cmd = [
+			"gcloud",
+			"compute",
+			"tpus",
+			"tpu-vm",
+			"ssh",
+			self.tpu_name,
+			f"--zone={self.zone}",
+			f"--worker={worker}",
+			f"--project={self.project_id}",
+			f"--command={command}",
+		]
+
+		self.logger.info(f"Executing command on worker {worker}: [info]{command}[/]")
+
+		if stream:
+			with Progress(
+				SpinnerColumn(),
+				TextColumn("[progress.description]{task.description}"),
+				TimeElapsedColumn(),
+				console=console,
+			) as progress:
+				task = progress.add_task("Running command...", total=None)
+
+				process = await asyncio.create_subprocess_exec(
+					*cmd,
+					stdout=asyncio.subprocess.PIPE,
+					stderr=asyncio.subprocess.PIPE,
+				)
+
+				async def read_stream(stream, is_stderr=False):
+					last_line = ""
+					while True:
+						line = await stream.readline()
+						if not line:
+							break
+						decoded_line = line.decode()
+
+						if is_tqdm_line(decoded_line):
+							# Update progress bar in place
+							clean_line = clean_tqdm_output(decoded_line)
+							if clean_line != last_line:
+								console.print(f"\r{clean_line}", end="")
+								last_line = clean_line
+						else:
+							# Regular output
+							if last_line:
+								console.print()  # New line after progress bar
+								last_line = ""
+							console.print(decoded_line.rstrip())
+
+				stdout_task = asyncio.create_task(read_stream(process.stdout))
+				stderr_task = asyncio.create_task(read_stream(process.stderr, True))
+
+				await asyncio.gather(stdout_task, stderr_task)
+				exit_code = await process.wait()
+
+				if exit_code == 0:
+					progress.update(
+						task, description="[success]Command completed successfully[/]"
+					)
+				else:
+					progress.update(task, description="[error]Command failed[/]")
+
+				return exit_code, "", ""
+		else:
+			process = await asyncio.create_subprocess_exec(
+				*cmd,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE,
+			)
+			stdout, stderr = await process.communicate()
+
+			if process.returncode == 0:
+				if background:
+					pid = stdout.decode().strip()
+					self.logger.info(f"Background process started with PID: [success]{pid}[/]")
+					return process.returncode, pid, stderr.decode()
+				else:
+					self.logger.info("[success]Command completed successfully[/]")
+					return process.returncode, stdout.decode(), stderr.decode()
+			else:
+				self.logger.error(f"Command failed: {stderr.decode()}")
+				return process.returncode, stdout.decode(), stderr.decode()
 
 
 class AsyncContext:
@@ -148,155 +310,6 @@ class EOConfig:
 
 		with open(self.error_log_file, "w") as f:
 			yaml.dump(error_log, f)
-
-
-console = Console(
-	theme=Theme(
-		{
-			"info": "cyan",
-			"warning": "yellow",
-			"error": "red bold",
-			"success": "green",
-		}
-	)
-)
-
-# Configure logging with rich handler
-logging.basicConfig(
-	level=logging.INFO,
-	format="%(message)s",
-	handlers=[RichHandler(console=console, rich_tracebacks=True)],
-)
-logger = logging.getLogger("tpu_manager")
-
-
-class TPUManager:
-	def __init__(self, project_id: str, zone: str, tpu_name: str):
-		self.project_id = project_id
-		self.zone = zone
-		self.tpu_name = tpu_name
-		self.logger = logger
-
-	async def get_status(self) -> dict:
-		cmd = [
-			"gcloud",
-			"compute",
-			"tpus",
-			"describe",
-			self.tpu_name,
-			f"--zone={self.zone}",
-			f"--project={self.project_id}",
-			"--format=json",
-		]
-
-		self.logger.info("Fetching TPU status...")
-		process = await asyncio.create_subprocess_exec(
-			*cmd,
-			stdout=asyncio.subprocess.PIPE,
-			stderr=asyncio.subprocess.PIPE,
-		)
-
-		stdout, stderr = await process.communicate()
-		if process.returncode == 0:
-			status = json.loads(stdout)
-			self.logger.info(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
-			return status
-		else:
-			error_message = stderr.decode()
-			self.logger.error(f"Failed to get TPU status: {error_message}")
-			raise RuntimeError(f"Failed to get TPU status: {error_message}")
-
-	async def execute_command(
-		self,
-		command: str,
-		worker: str = "all",
-		stream: bool = False,
-		background: bool = False,
-	) -> tuple:
-		"""
-		Executes a command on the TPU VM.
-
-		Args:
-		    command: The command to execute
-		    worker: The worker to execute the command on
-		    stream: Whether to stream the output
-		    background: Whether to run in background (nohup-like)
-		"""
-		if background:
-			command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
-
-		cmd = [
-			"gcloud",
-			"compute",
-			"tpus",
-			"tpu-vm",
-			"ssh",
-			self.tpu_name,
-			f"--zone={self.zone}",
-			f"--worker={worker}",
-			f"--project={self.project_id}",
-			f"--command={command}",
-		]
-
-		self.logger.info(f"Executing command on worker {worker}: [info]{command}[/]")
-
-		if stream:
-			with Progress(
-				SpinnerColumn(),
-				TextColumn("[progress.description]{task.description}"),
-				TimeElapsedColumn(),
-				console=console,
-			) as progress:
-				task = progress.add_task("Running command...", total=None)
-
-				process = await asyncio.create_subprocess_exec(
-					*cmd,
-					stdout=asyncio.subprocess.PIPE,
-					stderr=asyncio.subprocess.PIPE,
-				)
-
-				async def read_stream(stream, console, prefix):
-					while True:
-						line = await stream.readline()
-						if not line:
-							break
-						# Handle ANSI color codes properly through rich
-						console.print(f"[{prefix}] {line.decode().rstrip()}")
-
-				stdout_task = asyncio.create_task(read_stream(process.stdout, console, "info"))
-				stderr_task = asyncio.create_task(read_stream(process.stderr, console, "error"))
-
-				await asyncio.gather(stdout_task, stderr_task)
-				await process.wait()
-
-				if process.returncode == 0:
-					progress.update(
-						task, description="[success]Command completed successfully[/]"
-					)
-				else:
-					progress.update(task, description="[error]Command failed[/]")
-
-				return process.returncode, "", ""
-
-		else:
-			process = await asyncio.create_subprocess_exec(
-				*cmd,
-				stdout=asyncio.subprocess.PIPE,
-				stderr=asyncio.subprocess.PIPE,
-			)
-			stdout, stderr = await process.communicate()
-
-			if process.returncode == 0:
-				if background:
-					pid = stdout.decode().strip()
-					self.logger.info(f"Background process started with PID: [success]{pid}[/]")
-					return process.returncode, pid, stderr.decode()
-				else:
-					self.logger.info("[success]Command completed successfully[/]")
-					return process.returncode, stdout.decode(), stderr.decode()
-			else:
-				self.logger.error(f"Command failed: {stderr.decode()}")
-				return process.returncode, stdout.decode(), stderr.decode()
 
 
 @click.group()
