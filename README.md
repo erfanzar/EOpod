@@ -94,6 +94,22 @@ eopod run python train.py --delay 10
 eopod run python train.py --timeout 600
 ```
 
+### Kill and free TPU process
+
+```bash
+# Kill all TPU processes
+eopod kill-tpu
+
+# Force kill all TPU processes
+eopod kill-tpu --force
+
+# Kill specific PID(s)
+eopod kill-tpu --pid 1234 --pid 5678
+
+# Kill processes on specific worker
+eopod kill-tpu --worker 0
+```
+
 ### Viewing History and Logs
 
 ```bash

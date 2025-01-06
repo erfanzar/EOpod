@@ -528,6 +528,121 @@ def history():
 
 
 @cli.command()
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@click.option("--force", is_flag=True, help="Force kill all processes")
+@click.option("--pid", multiple=True, type=int, help="Specific PIDs to kill")
+@async_command
+async def kill_tpu(worker, force, pid):
+	"""Kill processes using TPU resources"""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	tpu = TPUManager(project_id, zone, tpu_name)
+
+	with Progress(
+		SpinnerColumn(),
+		TextColumn("[progress.description]{task.description}"),
+	) as progress:
+		task = progress.add_task(description="Scanning for TPU processes...", total=None)
+
+		try:
+			# Command to check if a process exists and is using TPU
+			check_process_cmd = (
+				"ps aux | grep -E 'python|jax|tensorflow' | "
+				"grep -v grep | awk '{print $2}' | "
+				"while read pid; do "
+				"  if [ -d /proc/$pid ] && grep -q 'accel' /proc/$pid/maps 2>/dev/null; then "
+				"    echo $pid;"
+				"  fi; "
+				"done"
+			)
+
+			# Get processes using TPU on each worker
+			worker_processes = {}
+			workers = (
+				[worker] if worker != "all" else range(8)
+			)  # Adjust range based on your TPU size
+
+			for w in workers:
+				returncode, stdout, stderr = await tpu.execute_command(
+					check_process_cmd, worker=str(w), stream=False
+				)
+
+				if returncode == 0 and stdout.strip():
+					pids = [int(p.strip()) for p in stdout.splitlines() if p.strip()]
+					if pids:
+						worker_processes[w] = pids
+
+			if not worker_processes:
+				console.print("[green]No TPU processes found.[/green]")
+				return
+
+			# Display found processes
+			console.print("\n[yellow]Found TPU processes:[/yellow]")
+			for w, pids in worker_processes.items():
+				console.print(f"Worker {w}: PIDs {', '.join(map(str, pids))}")
+
+			# If specific PIDs provided, filter them
+			if pid:
+				filtered_processes = {}
+				for w, pids in worker_processes.items():
+					matching_pids = [p for p in pids if p in pid]
+					if matching_pids:
+						filtered_processes[w] = matching_pids
+				worker_processes = filtered_processes
+
+			if not force:
+				if not click.confirm("[yellow]Do you want to kill these processes?[/yellow]"):
+					return
+
+			# Kill processes on their respective workers
+			for w, pids in worker_processes.items():
+				for pid in pids:
+					progress.update(task, description=f"Killing process {pid} on worker {w}...")
+					kill_cmd = f"kill {'-9' if force else ''} {pid}"
+
+					returncode, stdout, stderr = await tpu.execute_command(
+						kill_cmd, worker=str(w), stream=False
+					)
+
+					if returncode == 0:
+						console.print(
+							f"[green]Successfully killed process {pid} on worker {w}[/green]"
+						)
+					else:
+						console.print(
+							f"[red]Failed to kill process {pid} on worker {w}: {stderr}[/red]"
+						)
+
+			# Clean up TPU resources on affected workers
+			cleanup_commands = [
+				"sudo rm -f /tmp/libtpu_lockfile",
+				"sudo rmmod tpu || true",
+				"sudo modprobe tpu || true",
+			]
+
+			for w in worker_processes.keys():
+				progress.update(task, description=f"Cleaning up TPU resources on worker {w}...")
+				for cmd in cleanup_commands:
+					await tpu.execute_command(cmd, worker=str(w), stream=False)
+
+			# Verify TPU status
+			progress.update(task, description="Verifying TPU status...")
+			status = await tpu.get_status()
+			console.print(
+				f"[blue]Current TPU Status: {status.get('state', 'Unknown')}[/blue]"
+			)
+
+		except Exception as e:
+			console.print(f"[red]Error during TPU process cleanup: {str(e)}[/red]")
+			config.save_error_log("kill_tpu", str(e))
+
+
+@cli.command()
 def errors():
 	"""Show recent command execution errors."""
 	config = EOConfig()
