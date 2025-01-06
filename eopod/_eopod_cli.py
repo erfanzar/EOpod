@@ -213,7 +213,9 @@ class TPUManager:
 
 		if stream:
 			process = await asyncio.create_subprocess_exec(
-				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+				*cmd,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE,
 			)
 
 			async def read_stream(stream, console, prefix):
@@ -224,17 +226,38 @@ class TPUManager:
 					console.print(f"[blue]{prefix}[/blue]: {line.decode().rstrip()}")
 
 			# Create tasks for reading stdout and stderr
-			stdout_task = asyncio.create_task(read_stream(process.stdout, console, "OUT"))
-			stderr_task = asyncio.create_task(read_stream(process.stderr, console, "ERR"))
+			stdout_task = asyncio.create_task(
+				read_stream(
+					process.stdout,
+					console,
+					"OUT",
+				)
+			)
+			stderr_task = asyncio.create_task(
+				read_stream(
+					process.stderr,
+					console,
+					"ERR",
+				)
+			)
+			stdin_task = asyncio.create_task(
+				read_stream(
+					process.stdin,
+					console,
+					"IN",
+				)
+			)
 
 			# Wait for both streams to complete
-			await asyncio.gather(stdout_task, stderr_task)
+			await asyncio.gather(stdout_task, stderr_task, stdin_task)
 			await process.wait()
 			return process.returncode, "", ""
 
 		elif background:
 			process = await asyncio.create_subprocess_exec(
-				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+				*cmd,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE,
 			)
 			stdout, stderr = await process.communicate()
 			if process.returncode == 0:
@@ -243,7 +266,9 @@ class TPUManager:
 			return process.returncode, "", stderr.decode()
 		else:
 			process = await asyncio.create_subprocess_exec(
-				*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+				*cmd,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE,
 			)
 			stdout, stderr = await process.communicate()
 			return process.returncode, stdout.decode(), stderr.decode()
@@ -275,9 +300,9 @@ def configure(project_id, zone, tpu_name):
 @cli.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @click.argument("cmd_args", nargs=-1, type=click.UNPROCESSED)
 @click.option("--worker", default="all", help='Specific worker or "all"')
-@click.option("--retry", default=3, help="Number of retries for failed commands")
+@click.option("--retry", default=1, help="Number of retries for failed commands")
 @click.option("--delay", default=5, help="Delay between retries in seconds")
-@click.option("--timeout", default=300, help="Command timeout in seconds")
+@click.option("--timeout", default=-1, help="Command timeout in seconds")
 @click.option("--no-stream", is_flag=True, help="Disable output streaming")
 @click.option(
 	"--background", is_flag=True, help="Run command in background (nohup-like)"
@@ -292,7 +317,8 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 	# Join arguments preserving quotes and spaces
 	command = " ".join(cmd_args)
 	stream = not no_stream
-
+	if timeout == -1:
+		timeout = None
 	config = EOConfig()
 	project_id, zone, tpu_name = config.get_credentials()
 
@@ -324,7 +350,12 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 						"2>&1 & echo $!"
 					)
 					returncode, pid, stderr = await asyncio.wait_for(
-						tpu.execute_command(background_cmd, worker, stream=False, background=True),
+						tpu.execute_command(
+							background_cmd,
+							worker,
+							stream=False,
+							background=True,
+						),
 						timeout=timeout,
 					)
 					if returncode == 0:
@@ -340,7 +371,12 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 						break
 				else:
 					returncode, stdout, stderr = await asyncio.wait_for(
-						tpu.execute_command(command, worker, stream=stream, background=False),
+						tpu.execute_command(
+							command,
+							worker,
+							stream=stream,
+							background=False,
+						),
 						timeout=timeout,
 					)
 
