@@ -167,7 +167,9 @@ class TPUManager:
 		]
 
 		process = await asyncio.create_subprocess_exec(
-			*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+			*cmd,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.PIPE,
 		)
 
 		stdout, stderr = await process.communicate()
@@ -220,10 +222,13 @@ class TPUManager:
 
 			async def read_stream(stream, console, prefix):
 				while True:
-					line = await stream.readline()
-					if not line:
-						break
-					console.print(f"[blue]{prefix}[/blue]: {line.decode().rstrip()}")
+					try:
+						line = await stream.readline()
+						if not line:
+							break
+						console.print(line.decode().rstrip(), end="")
+					except Exception:
+						...
 
 			# Create tasks for reading stdout and stderr
 			stdout_task = asyncio.create_task(
@@ -557,9 +562,22 @@ def history():
 
 
 @cli.command()
-@click.option("--worker", default="all", help='Specific worker or "all"')
-@click.option("--force", is_flag=True, help="Force kill all processes")
-@click.option("--pid", multiple=True, type=int, help="Specific PIDs to kill")
+@click.option(
+	"--worker",
+	default="all",
+	help='Specific worker or "all"',
+)
+@click.option(
+	"--force",
+	is_flag=True,
+	help="Force kill all processes",
+)
+@click.option(
+	"--pid",
+	multiple=True,
+	type=int,
+	help="Specific PIDs to kill",
+)
 @async_command
 async def kill_tpu(worker, force, pid):
 	"""Kill processes using TPU resources"""
@@ -579,6 +597,16 @@ async def kill_tpu(worker, force, pid):
 		task = progress.add_task(description="Scanning for TPU processes...", total=None)
 
 		try:
+			# Get TPU status to determine number of workers
+			status = await tpu.get_status()
+
+			# Extract worker count from TPU status
+			worker_count = 1  # Default to 1 for single TPU
+			if "networkEndpoints" in status:
+				worker_count = len(status["networkEndpoints"])
+
+			workers = range(worker_count) if worker == "all" else [int(worker)]
+
 			# Command to check if a process exists and is using TPU
 			check_process_cmd = (
 				"ps aux | grep -E 'python|jax|tensorflow' | "
@@ -590,21 +618,23 @@ async def kill_tpu(worker, force, pid):
 				"done"
 			)
 
-			# Get processes using TPU on each worker
-			worker_processes = {}
-			workers = (
-				[worker] if worker != "all" else range(8)
-			)  # Adjust range based on your TPU size
-
-			for w in workers:
+			# Parallel process scanning
+			async def scan_worker(w):
 				returncode, stdout, stderr = await tpu.execute_command(
-					check_process_cmd, worker=str(w), stream=False
+					check_process_cmd,
+					worker=str(w),
+					stream=False,
 				)
-
 				if returncode == 0 and stdout.strip():
 					pids = [int(p.strip()) for p in stdout.splitlines() if p.strip()]
-					if pids:
-						worker_processes[w] = pids
+					return w, pids
+				return w, []
+
+			# Execute process scanning in parallel
+			tasks = [scan_worker(w) for w in workers]
+			results = await asyncio.gather(*tasks)
+
+			worker_processes = {w: pids for w, pids in results if pids}
 
 			if not worker_processes:
 				console.print("[green]No TPU processes found.[/green]")
@@ -628,42 +658,63 @@ async def kill_tpu(worker, force, pid):
 				if not click.confirm("[yellow]Do you want to kill these processes?[/yellow]"):
 					return
 
-			# Kill processes on their respective workers
-			for w, pids in worker_processes.items():
+			# Parallel process killing
+			async def kill_worker_processes(w, pids):
+				results = []
 				for pid in pids:
-					progress.update(task, description=f"Killing process {pid} on worker {w}...")
 					kill_cmd = f"kill {'-9' if force else ''} {pid}"
-
 					returncode, stdout, stderr = await tpu.execute_command(
 						kill_cmd, worker=str(w), stream=False
 					)
+					results.append((pid, returncode == 0, stderr))
+				return w, results
 
-					if returncode == 0:
+			# Execute process killing in parallel
+			kill_tasks = [
+				kill_worker_processes(w, pids) for w, pids in worker_processes.items()
+			]
+			kill_results = await asyncio.gather(*kill_tasks)
+
+			# Process results
+			for w, results in kill_results:
+				for pid, success, error in results:
+					if success:
 						console.print(
 							f"[green]Successfully killed process {pid} on worker {w}[/green]"
 						)
 					else:
 						console.print(
-							f"[red]Failed to kill process {pid} on worker {w}: {stderr}[/red]"
+							f"[red]Failed to kill process {pid} on worker {w}: {error}[/red]"
 						)
 
-			# Clean up TPU resources on affected workers
+			# Parallel cleanup
 			cleanup_commands = [
 				"sudo rm -f /tmp/libtpu_lockfile",
 				"sudo rmmod tpu || true",
 				"sudo modprobe tpu || true",
 			]
 
-			for w in worker_processes.keys():
-				progress.update(task, description=f"Cleaning up TPU resources on worker {w}...")
+			async def cleanup_worker(w):
+				results = []
 				for cmd in cleanup_commands:
-					await tpu.execute_command(cmd, worker=str(w), stream=False)
+					returncode, stdout, stderr = await tpu.execute_command(
+						cmd, worker=str(w), stream=False
+					)
+					results.append((cmd, returncode == 0, stderr))
+				return w, results
+
+			# Execute cleanup in parallel
+			cleanup_tasks = [cleanup_worker(w) for w in worker_processes.keys()]
+			cleanup_results = await asyncio.gather(*cleanup_tasks)
+
+			for w, results in cleanup_results:
+				progress.update(task, description=f"Cleaned up TPU resources on worker {w}")
 
 			# Verify TPU status
 			progress.update(task, description="Verifying TPU status...")
-			status = await tpu.get_status()
+			final_status = await tpu.get_status()
 			console.print(
-				f"[blue]Current TPU Status: {status.get('state', 'Unknown')}[/blue]"
+				f"[blue]Current TPU Status: {final_status.get('state', 'Unknown')}[/blue]"
 			)
 
 		except Exception as e:
