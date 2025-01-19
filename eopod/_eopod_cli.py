@@ -16,11 +16,12 @@ import asyncio
 import configparser
 import json
 import logging
+import os
+import re
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import os
 
 import click
 import yaml
@@ -799,6 +800,52 @@ def show_config():
 		console.print(
 			"[red]No configuration found. Please run 'eopod configure' first.[/red]"
 		)
+
+
+@cli.command()
+@click.option(
+	"--install-tpuinfo",
+	is_flag=True,
+	help="installs tpu-info (for first time only).",
+)
+@async_command
+async def show_tpu_usage(install_tpuinfo):
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	tpu = TPUManager(project_id, zone, tpu_name)
+	if install_tpuinfo:
+		await tpu.execute_command("pip install tpu-info", stream=False)
+	_, text, __ = await tpu.execute_command(
+		'python -c "from tpu_info import cli;cli.print_chip_info()"',
+		stream=False,
+	)
+	pattern = r"│\s+(\d+)\s+│\s+([\d.]+ GiB / [\d.]+ GiB)\s+│\s+([\d.]+%)\s+│"
+	matches = re.findall(pattern, text)
+	table_data = []
+	for match in matches:
+		device_index, memory_usage, duty_cycle = match
+		table_data.append([int(device_index), memory_usage, duty_cycle])
+	table_data_sorted = [
+		[str(row[0]), row[1], row[2]] for row in sorted(table_data, key=lambda x: x[0])
+	]
+	table = Table(
+		title="[bold magenta]TPU Utilization[/bold magenta]",
+		title_justify="left",
+	)
+	# Add columns
+	table.add_column("📟 Device Index", justify="center", style="bold blue")
+	table.add_column("💾 Memory Usage", justify="left", style="white")
+	table.add_column("⚡ Duty Cycle", justify="right", style="white")
+	# Add rows to the table
+	for row in table_data_sorted:
+		table.add_row(str(row[0]), row[1], row[2])
+	# Print the table
+	console.print(table)
 
 
 def main():
