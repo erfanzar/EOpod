@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
@@ -184,6 +185,102 @@ class TPUManager:
 			else:
 				console.print(f"[red]Command failed: {stderr.decode()}[/]")
 				return process.returncode, stdout.decode(), stderr.decode()
+			# gcloud compute tpus describe LLaMA --zone=us-central2-b --project=phd-research-384422 --format=json
+			# gcloud compute tpus tpu-vm describe LLaMA --zone=us-central2-b --project=phd-research-384422 --format="value(networkEndpoints[].accessConfig.externalIp)"
+
+	async def get_tpu_details(self) -> dict:
+		"""Fetch detailed information about the TPU."""
+		cmd = [
+			"gcloud",
+			"compute",
+			"tpus",
+			"describe",
+			self.tpu_name,
+			f"--zone={self.zone}",
+			f"--project={self.project_id}",
+			"--format=json",
+		]
+
+		process = await asyncio.create_subprocess_exec(
+			*cmd,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.PIPE,
+		)
+
+		stdout, stderr = await process.communicate()
+		if process.returncode == 0:
+			return json.loads(stdout)
+		else:
+			error_message = stderr.decode()
+			console.print(f"[red]Failed to fetch TPU details[/]: {error_message}")
+			raise RuntimeError(f"Failed to fetch TPU details: {error_message}")
+
+	async def get_internal_ips(self) -> dict:
+		"""Get internal IP addresses of TPU workers."""
+		try:
+			tpu_details = await self.get_tpu_details()
+			network_endpoints = tpu_details.get("networkEndpoints", [])
+			if not network_endpoints:
+				console.print("[yellow]No network endpoints found for the TPU[/yellow]")
+				return {}
+
+			internal_ips = {}
+			for idx, endpoint in enumerate(network_endpoints):
+				worker_id = f"worker-{idx}"
+				internal_ip = endpoint.get("ipAddress")
+				if internal_ip:
+					internal_ips[worker_id] = internal_ip
+				else:
+					console.print(f"[yellow]No internal IP found for {worker_id}[/yellow]")
+
+			return internal_ips
+		except Exception as e:
+			console.print(f"[red]Error fetching internal IPs: {str(e)}[/red]")
+			raise
+
+	async def get_external_ips(self) -> dict:
+		"""Get external IP addresses of TPU workers."""
+		try:
+			cmd = [
+				"gcloud",
+				"compute",
+				"tpus",
+				"tpu-vm",
+				"describe",
+				self.tpu_name,
+				f"--zone={self.zone}",
+				f"--project={self.project_id}",
+				'--format="value(networkEndpoints[].accessConfig.externalIp)"',
+			]
+			string_command = " ".join(cmd)
+			process = subprocess.run(
+				string_command, shell=True, capture_output=True, text=True
+			)
+			return process.stdout.replace(";", ",").strip()
+		except Exception as e:
+			console.print(f"[red]Error fetching external IPs: {str(e)}[/red]")
+			raise
+
+	def format_ips_comma_separated(self, ips: dict) -> str:
+		"""Format IP addresses as a comma-separated string."""
+		return ",".join(ips.values())
+
+	def display_ips(self, ips: dict, ip_type: str, output_format: str = "table"):
+		"""Display IP addresses in the specified format."""
+		if not ips:
+			console.print(f"[yellow]No {ip_type} IPs found[/yellow]")
+			return
+
+		if output_format == "comma":
+			comma_separated_ips = self.format_ips_comma_separated(ips)
+			console.print(f"{comma_separated_ips}")
+		else:  # Default to table format
+			table = Table(title=f"{ip_type.capitalize()} IP Addresses")
+			table.add_column("Worker", style="cyan")
+			table.add_column(f"{ip_type.capitalize()} IP", style="info")
+			for worker, ip in ips.items():
+				table.add_row(worker, ip)
+			console.print(table)
 
 
 class AsyncContext:
@@ -290,13 +387,12 @@ class EOConfig:
 
 		error_log.append(
 			{
-				"timestamp": datetime.now().isoformat(),  # Add timestamp here
+				"timestamp": datetime.now().isoformat(),
 				"command": command,
 				"error": error,
 			}
 		)
 
-		# Keep only last 50 errors
 		error_log = error_log[-50:]
 
 		with open(self.error_log_file, "w") as f:
@@ -324,6 +420,53 @@ def configure(project_id, zone, tpu_name):
 	config.config["DEFAULT"]["tpu_name"] = tpu_name
 	config.save_config()
 	console.print("[green]Configuration saved successfully![/green]")
+
+
+@cli.command()
+@click.option(
+	"--format",
+	type=click.Choice(["table", "comma"]),
+	default="comma",
+	help="Output format: 'table' or 'comma'",
+)
+@async_command
+async def get_internal_ips(format):
+	"""Get internal IP addresses of TPU workers."""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
+		return
+
+	tpu_manager = TPUManager(project_id, zone, tpu_name)
+	try:
+		internal_ips = await tpu_manager.get_internal_ips()
+		tpu_manager.display_ips(internal_ips, "internal", output_format=format)
+	except Exception as e:
+		console.print(f"[red]Failed to get internal IPs: {str(e)}[/red]")
+
+
+@cli.command()
+@click.option(
+	"--format",
+	type=click.Choice(["table", "comma"]),
+	default="comma",
+	help="Output format: 'table' or 'comma'",
+)
+@async_command
+async def get_external_ips(format):
+	"""Get external IP addresses of TPU workers."""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
+		return
+	tpu_manager = TPUManager(project_id, zone, tpu_name)
+	try:
+		external_ips = await tpu_manager.get_external_ips()
+		console.print(external_ips)
+	except Exception as e:
+		console.print(f"[red]Failed to get external IPs: {str(e)}[/red]")
 
 
 @cli.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
@@ -802,14 +945,7 @@ def show_config():
 		)
 
 
-@cli.command()
-@click.option(
-	"--install-tpuinfo",
-	is_flag=True,
-	help="installs tpu-info (for first time only).",
-)
-@async_command
-async def show_tpu_usage(install_tpuinfo):
+async def _smi_status(install_tpuinfo):
 	config = EOConfig()
 	project_id, zone, tpu_name = config.get_credentials()
 
@@ -846,6 +982,28 @@ async def show_tpu_usage(install_tpuinfo):
 		table.add_row(str(row[0]), row[1], row[2])
 	# Print the table
 	console.print(table)
+
+
+@cli.command()
+@click.option(
+	"--install-tpuinfo",
+	is_flag=True,
+	help="installs tpu-info (for first time only).",
+)
+@async_command
+async def show_tpu_usage(install_tpuinfo):
+	await _smi_status(install_tpuinfo)
+
+
+@cli.command()
+@click.option(
+	"--install-tpuinfo",
+	is_flag=True,
+	help="installs tpu-info (for first time only).",
+)
+@async_command
+async def smi(install_tpuinfo):
+	await _smi_status(install_tpuinfo)
 
 
 def main():
