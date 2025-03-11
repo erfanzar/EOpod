@@ -406,14 +406,58 @@ def cli():
 
 
 @cli.command()
-@click.option("--project-id", required=True, help="Google Cloud Project ID")
-@click.option("--zone", required=True, help="Google Cloud Zone")
+@click.option(
+	"--project-id", help="Google Cloud Project ID (optional if running on GCP)"
+)
+@click.option("--zone", help="Google Cloud Zone (optional if running on GCP)")
 @click.option("--tpu-name", required=True, help="TPU Name")
 def configure(project_id, zone, tpu_name):
 	"""Configure EOpod with your Google Cloud details"""
+	import subprocess
+	import re
+
 	config = EOConfig()
 	if "DEFAULT" not in config.config:
 		config.config["DEFAULT"] = {}
+
+	if not project_id:
+		try:
+			project_id = subprocess.check_output(
+				"curl -s 'http://metadata.google.internal/computeMetadata/v1/project/project-id' -H 'Metadata-Flavor: Google'",
+				shell=True,
+				text=True,
+			).strip()
+			console.print(f"[yellow]Auto-detected project ID: {project_id}[/yellow]")
+		except subprocess.CalledProcessError:
+			console.print(
+				"[red]Failed to auto-detect project ID. Please provide it manually.[/red]"
+			)
+			return
+
+	# Fetch zone from metadata server if not provided
+	if not zone:
+		try:
+			zone_output = subprocess.check_output(
+				"curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/zone' -H 'Metadata-Flavor: Google'",
+				shell=True,
+				text=True,
+			).strip()
+
+			# Extract zone from output format "projects/PROJECT_ID/zones/ZONE"
+			zone_match = re.search(r"/zones/([^/]+)", zone_output)
+			if zone_match:
+				zone = zone_match.group(1)
+				console.print(f"[yellow]Auto-detected zone: {zone}[/yellow]")
+			else:
+				console.print(
+					"[red]Failed to parse auto-detected zone. Please provide it manually.[/red]"
+				)
+				return
+		except subprocess.CalledProcessError:
+			console.print(
+				"[red]Failed to auto-detect zone. Please provide it manually.[/red]"
+			)
+			return
 
 	config.config["DEFAULT"]["project_id"] = project_id
 	config.config["DEFAULT"]["zone"] = zone
