@@ -413,8 +413,8 @@ def cli():
 @click.option("--tpu-name", required=True, help="TPU Name")
 def configure(project_id, zone, tpu_name):
 	"""Configure EOpod with your Google Cloud details"""
-	import subprocess
 	import re
+	import subprocess
 
 	config = EOConfig()
 	if "DEFAULT" not in config.config:
@@ -1048,6 +1048,162 @@ async def show_tpu_usage(install_tpuinfo):
 @async_command
 async def smi(install_tpuinfo):
 	await _smi_status(install_tpuinfo)
+
+
+@cli.command()
+@click.option(
+	"--external", is_flag=True, help="Use external IPs instead of internal IPs"
+)
+@click.option("--stop", is_flag=True, help="Stop the Ray cluster")
+@click.option("--verify", is_flag=True, help="Verify the Ray cluster setup")
+@click.option("--tpu-version", help="Set TPU version (auto-detected if not provided)")
+@click.option(
+	"--tpu-slice", type=int, help="Set TPU slice size (auto-detected if not provided)"
+)
+@click.option(
+	"--num-slices",
+	type=int,
+	default=1,
+	help="Number of TPU slices to combine (default: 1)",
+)
+@click.option("--ssh-user", help="SSH username to use")
+@click.option("--config", help="Path to YAML config file with IP addresses")
+@click.option("--test-ssh", is_flag=True, help="Test SSH connectivity to all nodes")
+@click.option("--external-ips", help="Comma-separated list of external IPs")
+@click.option(
+	"--self-job", is_flag=True, help="Run only on the current machine (no SSH)"
+)
+@click.option(
+	"--slice-config", help="Path to YAML config file with slice configurations"
+)
+def auto_config_ray(
+	external,
+	stop,
+	verify,
+	tpu_version,
+	tpu_slice,
+	num_slices,
+	ssh_user,
+	config,
+	test_ssh,
+	external_ips,
+	self_job,
+	slice_config,
+):
+	"""
+	Auto-configure Ray on TPU cluster using internal IPs from current setup.
+	Automatically detects TPU version and slice size if not specified.
+	"""
+	import re
+	import shlex
+	import subprocess
+
+	console.print("[yellow]making sure eformer is installed on all pods...[/yellow]")
+	subprocess.run(
+		["eopod", "run", "pip", "install", "eformer", "-qU"],
+		shell=True,
+		check=True,
+		text=True,
+	)
+	# Step 1: Get internal IPs
+	try:
+		console.print("[yellow]Fetching internal IPs from eopod...[/yellow]")
+		internal_ips_output = subprocess.check_output(
+			"eopod get-internal-ips", shell=True, text=True
+		).strip()
+
+		# Parse the output to extract IPs (assuming one IP per line)
+		internal_ips = [ip.strip() for ip in internal_ips_output.split("\n") if ip.strip()]
+
+		if not internal_ips:
+			console.print(
+				"[red]No internal IPs found. Make sure eopod is configured correctly.[/red]"
+			)
+			return
+
+		# Format IPs as comma-separated string
+		internal_ips_str = ",".join(internal_ips)
+		console.print(f"[green]Found internal IPs: {internal_ips_str}[/green]")
+
+	except subprocess.CalledProcessError as e:
+		console.print(f"[red]Failed to get internal IPs: {str(e)}[/red]")
+		return
+
+	# Step 2: Auto-detect TPU version and slice size if not provided
+	if not tpu_version or not tpu_slice:
+		try:
+			console.print("[yellow]Auto-detecting TPU configuration...[/yellow]")
+			accelerator_type = subprocess.check_output(
+				"curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/attributes/accelerator-type' -H 'Metadata-Flavor: Google'",
+				shell=True,
+				text=True,
+			).strip()
+
+			# Parse accelerator type (format: v4-32)
+			match = re.match(r"v(\d+)-(\d+)", accelerator_type)
+			if match:
+				detected_version = match.group(1)
+				detected_slice = int(match.group(2))
+
+				if not tpu_version:
+					tpu_version = f"v{detected_version}"
+					console.print(f"[green]Auto-detected TPU version: {tpu_version}[/green]")
+
+				if not tpu_slice:
+					tpu_slice = detected_slice
+					console.print(f"[green]Auto-detected TPU slice size: {tpu_slice}[/green]")
+			else:
+				console.print(
+					f"[yellow]Could not parse accelerator type: {accelerator_type}. Please provide --tpu-version and --tpu-slice manually.[/yellow]"
+				)
+				if not tpu_version or not tpu_slice:
+					console.print("[red]TPU version and slice size are required. Exiting.[/red]")
+					return
+		except subprocess.CalledProcessError:
+			console.print(
+				"[yellow]Failed to auto-detect TPU configuration. Please provide --tpu-version and --tpu-slice manually.[/yellow]"
+			)
+			if not tpu_version or not tpu_slice:
+				console.print("[red]TPU version and slice size are required. Exiting.[/red]")
+				return
+
+	# Step 3: Construct command with all provided arguments
+	cmd_parts = ["eopod", "run", "python", "-m", "eformer.escale.tpexec.tpu_patcher"]
+
+	# Add all specified arguments
+	cmd_parts.extend(["--tpu-version", str(tpu_version)])
+	cmd_parts.extend(["--tpu-slice", str(tpu_slice)])
+	cmd_parts.extend(["--num-slices", str(num_slices)])
+	cmd_parts.extend(["--internal-ips", internal_ips_str])
+
+	# Add optional flags
+	if external:
+		cmd_parts.append("--external")
+	if stop:
+		cmd_parts.append("--stop")
+	if verify:
+		cmd_parts.append("--verify")
+	if self_job:
+		cmd_parts.append("--self-job")
+	if test_ssh:
+		cmd_parts.append("--test-ssh")
+
+	if ssh_user:
+		cmd_parts.extend(["--ssh-user", ssh_user])
+	if config:
+		cmd_parts.extend(["--config", config])
+	if external_ips:
+		cmd_parts.extend(["--external-ips", external_ips])
+	if slice_config:
+		cmd_parts.extend(["--slice-config", slice_config])
+
+	final_cmd = " ".join(shlex.quote(str(part)) for part in cmd_parts)
+	console.print(f"[yellow]Executing: {final_cmd}[/yellow]")
+	try:
+		subprocess.run(final_cmd, shell=True, check=True, text=True)
+		console.print("[green]Ray cluster configuration completed successfully![/green]")
+	except subprocess.CalledProcessError as e:
+		console.print(f"[red]Failed to configure Ray cluster: {str(e)}[/red]")
 
 
 def main():
