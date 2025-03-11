@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "eopod"
-version = "0.0.10"
+version = "0.0.10.1"
 
 description = "EOpod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]

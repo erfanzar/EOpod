@@ -1100,7 +1100,7 @@ def auto_config_ray(
 
 	console.print("[yellow]making sure eformer is installed on all pods...[/yellow]")
 	subprocess.run(
-		["eopod", "run", "pip", "install", "eformer", "-qU"],
+		["eopod run pip install eformer -qU"],
 		shell=True,
 		check=True,
 		text=True,
