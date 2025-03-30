@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from datetime import datetime
 from functools import wraps
@@ -185,8 +186,6 @@ class TPUManager:
 			else:
 				console.print(f"[red]Command failed: {stderr.decode()}[/]")
 				return process.returncode, stdout.decode(), stderr.decode()
-			# gcloud compute tpus describe LLaMA --zone=us-central2-b --project=phd-research-384422 --format=json
-			# gcloud compute tpus tpu-vm describe LLaMA --zone=us-central2-b --project=phd-research-384422 --format="value(networkEndpoints[].accessConfig.externalIp)"
 
 	async def get_tpu_details(self) -> dict:
 		"""Fetch detailed information about the TPU."""
@@ -304,6 +303,29 @@ def async_command(fn):
 		return asyncio.run(fn(*args, **kwargs))
 
 	return wrapper
+
+
+async def run_command(command, capture_output=False):
+	"""Run a command locally and return the result."""
+	process = await asyncio.create_subprocess_exec(
+		*shlex.split(command),
+		stdout=asyncio.subprocess.PIPE if capture_output else None,
+		stderr=asyncio.subprocess.PIPE if capture_output else None,
+	)
+
+	if capture_output:
+		stdout, stderr = await process.communicate()
+		if process.returncode != 0:
+			error_msg = stderr.decode()
+			raise Exception(
+				f"Command failed with exit code {process.returncode}: {error_msg}"
+			)
+		return stdout.decode()
+	else:
+		await process.communicate()
+		if process.returncode != 0:
+			raise Exception(f"Command failed with exit code {process.returncode}")
+		return None
 
 
 class EOConfig:
@@ -1071,7 +1093,9 @@ async def smi(install_tpuinfo):
 @click.option("--test-ssh", is_flag=True, help="Test SSH connectivity to all nodes")
 @click.option("--external-ips", help="Comma-separated list of external IPs")
 @click.option(
-	"--self-job", is_flag=True, help="Run only on the current machine (no SSH)"
+	"--self-job",
+	is_flag=True,
+	help="Run only on the current machine (no SSH)",
 )
 @click.option(
 	"--slice-config", help="Path to YAML config file with slice configurations"
@@ -1204,6 +1228,215 @@ def auto_config_ray(
 		console.print("[green]Ray cluster configuration completed successfully![/green]")
 	except subprocess.CalledProcessError as e:
 		console.print(f"[red]Failed to configure Ray cluster: {str(e)}[/red]")
+
+
+@cli.command()
+@click.option(
+	"--port",
+	"-p",
+	type=int,
+	required=True,
+	multiple=True,
+	help="Port number(s) to open. Can be specified multiple times (e.g., -p 80 -p 443).",
+)
+@click.option(
+	"--direction",
+	type=click.Choice(["ingress", "egress", "both"], case_sensitive=False),
+	default="both",
+	show_default=True,
+	help="Direction of traffic to allow.",
+)
+@click.option(
+	"--protocol",
+	default="tcp",
+	show_default=True,
+	type=click.Choice(["tcp", "udp", "icmp", "all"], case_sensitive=False),
+	help="Protocol to allow.",
+)
+@click.option(
+	"--target-tag",
+	default=None,
+	help="Network tag for VMs. If omitted, defaults to 'tpu-<your-tpu-name>'. IMPORTANT: VMs must have this tag!",
+)
+@click.option(
+	"--source-ranges",
+	default="0.0.0.0/0",
+	show_default=True,
+	help="Source IP CIDR range for ingress rules.",
+)
+@click.option(
+	"--destination-ranges",
+	default="0.0.0.0/0",
+	show_default=True,
+	help="Destination IP CIDR range for egress rules.",
+)
+@click.option(
+	"--priority",
+	type=int,
+	default=1000,
+	show_default=True,
+	help="Firewall rule priority (lower number = higher priority).",
+)
+@click.option(
+	"--description",
+	default="Rule created by eopod",
+	show_default=True,
+	help="Description for the firewall rule.",
+)
+@click.option(
+	"--network",
+	default=None,
+	help="Network name to use. If omitted, will attempt to detect from TPU configuration.",
+)
+@click.option(
+	"--update-existing/--skip-existing",
+	default=False,
+	show_default=True,
+	help="Whether to update existing rules or skip them.",
+)
+@click.option(
+	"--verify-tag",
+	is_flag=True,
+	default=False,
+	help="Verify that the target tag is applied to the TPU VM before creating rules.",
+)
+@async_command
+async def open_port(
+	port,
+	direction,
+	protocol,
+	target_tag,
+	source_ranges,
+	destination_ranges,
+	priority,
+	description,
+	network,
+	update_existing,
+	verify_tag,
+):
+	"""Creates GCP firewall rules to open ports for TPU VMs."""
+	config = EOConfig()
+	project_id, zone, tpu_name = config.get_credentials()
+
+	if not all([project_id, zone, tpu_name]):
+		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+		return
+
+	# Sanitize tpu_name for use in rule and default tag names
+	safe_tpu_name = tpu_name.lower()
+
+	effective_target_tag = target_tag if target_tag is not None else f"{safe_tpu_name}"
+
+	tpu_manager = TPUManager(project_id, zone, tpu_name)
+
+	# If network is None, try to get it from TPU configuration
+	if network is None:
+		try:
+			tpu_info = await tpu_manager.get_tpu_info()
+			network = tpu_info.get("networkConfig", {}).get("network", "default")
+			console.print(f"Using network: {network}")
+		except Exception as e:
+			console.print(
+				f"[yellow]Could not determine network from TPU config: {e}[/yellow]"
+			)
+			console.print("[yellow]Using 'default' network instead[/yellow]")
+			network = "default"
+
+	# If verify_tag is True, check if the VM has the required tag
+	if verify_tag:
+		try:
+			tpu_info = await tpu_manager.get_tpu_info()
+			vm_tags = tpu_info.get("networkConfig", {}).get("networkTags", [])
+			if effective_target_tag not in vm_tags:
+				console.print(
+					f"[red]Target tag '{effective_target_tag}' is not applied to the TPU VM![/red]"
+				)
+				console.print(
+					f"[yellow]Available tags: {', '.join(vm_tags) if vm_tags else 'None'}[/yellow]"
+				)
+				if click.confirm("Do you want to add this tag to the TPU VM?", default=False):
+					# Add code to add the tag to the VM
+					console.print("[yellow]Adding tag functionality not implemented yet[/yellow]")
+				else:
+					return
+		except Exception as e:
+			console.print(f"[yellow]Could not verify tags: {e}[/yellow]")
+			if not click.confirm("Continue without verifying tags?", default=False):
+				return
+
+	# Convert 'both' to a list of directions to process
+	directions_to_process = (
+		["ingress", "egress"] if direction.lower() == "both" else [direction.lower()]
+	)
+
+	for p in port:
+		for current_direction in directions_to_process:
+			# Create rule name based on direction and port
+			rule_name = f"a-allow-{safe_tpu_name}-{p}-{current_direction}".lower()[:63]
+
+			# Check if rule already exists
+			try:
+				cmd = f"gcloud compute firewall-rules describe {rule_name} --project={project_id} --format=json"
+				_ = await run_command(cmd, capture_output=True)
+				rule_exists = True
+				console.print(f"Rule '{rule_name}' already exists.")
+
+				if not update_existing:
+					console.print("[yellow]Skipping (use --update-existing to update)[/yellow]")
+					continue
+
+			except Exception:
+				rule_exists = False
+
+			# Build the gcloud command parts as a list for proper shell escaping
+			cmd_parts = [
+				"gcloud",
+				"compute",
+				"firewall-rules",
+				"update" if rule_exists else "create",
+				rule_name,
+				f"--project={project_id}",
+				f"--direction={current_direction.upper()}",
+				f"--priority={priority}",
+				f"--network={network}",
+				"--action=ALLOW",
+			]
+
+			# Add protocol-specific rules
+			if protocol == "all":
+				cmd_parts.append("--rules=all")
+			elif protocol == "icmp":
+				cmd_parts.append("--rules=icmp")
+			else:
+				cmd_parts.append(f"--rules={protocol}:{p}")
+
+			# Add source ranges for ingress direction
+			if current_direction.lower() == "ingress":
+				cmd_parts.append(f"--source-ranges={source_ranges}")
+
+			# Add destination ranges for egress direction
+			if current_direction.lower() == "egress":
+				cmd_parts.append(f"--destination-ranges={destination_ranges}")
+
+			# Add target tags
+			cmd_parts.append(f"--target-tags={effective_target_tag}")
+
+			# Add description (properly escaped)
+			cmd_parts.append(f"--description='{description}'")
+
+			# Execute the command
+			cmd = " ".join(cmd_parts)
+			console.print(f"[green]Executing:[/green]\n{cmd}")
+
+			try:
+				await run_command(cmd)
+				console.print(
+					f"[green]Successfully {'updated' if rule_exists else 'created'} firewall rule '{rule_name}'[/green]"
+				)
+			except Exception as e:
+				console.print(
+					f"[red]Failed to {'update' if rule_exists else 'create'} firewall rule: {e}[/red]"
+				)
 
 
 def main():
