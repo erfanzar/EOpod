@@ -931,6 +931,7 @@ async def kill_tpu(worker, force, pid):
 			# Parallel cleanup
 			cleanup_commands = [
 				"sudo rm -f /tmp/libtpu_lockfile",
+				"sudo rm -rf /tmp/tpu_logs",
 				"sudo rmmod tpu || true",
 				"sudo modprobe tpu || true",
 			]
