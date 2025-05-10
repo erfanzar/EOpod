@@ -24,7 +24,6 @@ from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from shlex import quote
 
 import click
 import yaml
@@ -85,7 +84,6 @@ def list2cmdline(seq):
 def clean_tqdm_output(line: str) -> str:
 	"""Clean up TQDM progress bar output to show only the latest state."""
 	if "\r" in line:
-		# Take only the last progress bar update
 		return line.rstrip().split("\r")[-1]
 	return line.rstrip()
 
@@ -274,7 +272,7 @@ class TPUManager:
 		if output_format == "comma":
 			comma_separated_ips = self.format_ips_comma_separated(ips)
 			console.print(f"{comma_separated_ips}")
-		else:  # Default to table format
+		else:
 			table = Table(title=f"{ip_type.capitalize()} IP Addresses")
 			table.add_column("Worker", style="cyan")
 			table.add_column(f"{ip_type.capitalize()} IP", style="info")
@@ -391,7 +389,6 @@ class EOConfig:
 			}
 		)
 
-		# Keep only last 100 commands in history
 		history = history[-100:]
 
 		with open(self.history_file, "w") as f:
@@ -457,7 +454,6 @@ def configure(project_id, zone, tpu_name):
 			)
 			return
 
-	# Fetch zone from metadata server if not provided
 	if not zone:
 		try:
 			zone_output = subprocess.check_output(
@@ -466,7 +462,6 @@ def configure(project_id, zone, tpu_name):
 				text=True,
 			).strip()
 
-			# Extract zone from output format "projects/PROJECT_ID/zones/ZONE"
 			zone_match = re.search(r"/zones/([^/]+)", zone_output)
 			if zone_match:
 				zone = zone_match.group(1)
@@ -553,7 +548,6 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 		console.print("[red]No command provided[/red]")
 		return
 
-	# Join arguments preserving quotes and spaces
 	command = " ".join(cmd_args)
 	stream = not no_stream
 	if timeout == -1:
@@ -574,7 +568,7 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 	with Progress(
 		SpinnerColumn(),
 		TextColumn("[progress.description]{task.description}"),
-		disable=stream,  # Disable progress bar when streaming
+		disable=stream,
 	) as progress:
 		task = progress.add_task(
 			description=f"Executing command: {command} (Attempt 1)", total=None
@@ -583,7 +577,6 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 		for attempt in range(1, retry + 1):
 			try:
 				if background:
-					# Add more detailed background process handling
 					background_cmd = (
 						f"nohup {command} > /tmp/nohup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.out "
 						"2>&1 & echo $!"
@@ -603,8 +596,6 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 						)
 						console.print("[green]Output will be saved to /tmp/nohup_*.out[/green]")
 						config.save_command_history(command, "background", f"PID: {pid}")
-
-						# Show how to check the process
 						console.print("\n[yellow]To check process status:[/yellow]")
 						console.print(f"eopod check-background {pid}")
 						break
@@ -629,8 +620,6 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 							console.print(stdout)
 						else:
 							console.print("[green]Command completed successfully![/green]")
-
-						# Add command completion timestamp
 						end_time = datetime.now()
 						duration = end_time - start_time
 						console.print(
@@ -714,7 +703,6 @@ async def check_background(pid_args, worker):
 		console.print(f"[red]Error checking background processes:[/red] {stderr}")
 
 
-# Add a command to kill background processes
 @cli.command()
 @click.argument("pid_args", nargs=-1, required=True)
 @click.option("--worker", default="all", help='Specific worker or "all"')
@@ -838,17 +826,14 @@ async def kill_tpu(worker, force, pid):
 		task = progress.add_task(description="Scanning for TPU processes...", total=None)
 
 		try:
-			# Get TPU status to determine number of workers
 			status = await tpu.get_status()
 
-			# Extract worker count from TPU status
-			worker_count = 1  # Default to 1 for single TPU
+			worker_count = 1
 			if "networkEndpoints" in status:
 				worker_count = len(status["networkEndpoints"])
 
 			workers = range(worker_count) if worker == "all" else [int(worker)]
 
-			# Command to check if a process exists and is using TPU
 			check_process_cmd = (
 				"ps aux | grep -E 'python|jax|tensorflow' | "
 				"grep -v grep | awk '{print $2}' | "
@@ -859,7 +844,6 @@ async def kill_tpu(worker, force, pid):
 				"done"
 			)
 
-			# Parallel process scanning
 			async def scan_worker(w):
 				returncode, stdout, stderr = await tpu.execute_command(
 					check_process_cmd,
@@ -871,7 +855,6 @@ async def kill_tpu(worker, force, pid):
 					return w, pids
 				return w, []
 
-			# Execute process scanning in parallel
 			tasks = [scan_worker(w) for w in workers]
 			results = await asyncio.gather(*tasks)
 
@@ -881,12 +864,10 @@ async def kill_tpu(worker, force, pid):
 				console.print("[green]No TPU processes found.[/green]")
 				return
 
-			# Display found processes
 			console.print("\n[yellow]Found TPU processes:[/yellow]")
 			for w, pids in worker_processes.items():
 				console.print(f"Worker {w}: PIDs {', '.join(map(str, pids))}")
 
-			# If specific PIDs provided, filter them
 			if pid:
 				filtered_processes = {}
 				for w, pids in worker_processes.items():
@@ -899,7 +880,6 @@ async def kill_tpu(worker, force, pid):
 				if not click.confirm("[yellow]Do you want to kill these processes?[/yellow]"):
 					return
 
-			# Parallel process killing
 			async def kill_worker_processes(w, pids):
 				results = []
 				for pid in pids:
@@ -910,13 +890,11 @@ async def kill_tpu(worker, force, pid):
 					results.append((pid, returncode == 0, stderr))
 				return w, results
 
-			# Execute process killing in parallel
 			kill_tasks = [
 				kill_worker_processes(w, pids) for w, pids in worker_processes.items()
 			]
 			kill_results = await asyncio.gather(*kill_tasks)
 
-			# Process results
 			for w, results in kill_results:
 				for pid, success, error in results:
 					if success:
@@ -927,8 +905,6 @@ async def kill_tpu(worker, force, pid):
 						console.print(
 							f"[red]Failed to kill process {pid} on worker {w}: {error}[/red]"
 						)
-
-			# Parallel cleanup
 			cleanup_commands = [
 				"sudo rm -f /tmp/libtpu_lockfile",
 				"sudo rmmod tpu || true",
@@ -944,14 +920,12 @@ async def kill_tpu(worker, force, pid):
 					results.append((cmd, returncode == 0, stderr))
 				return w, results
 
-			# Execute cleanup in parallel
 			cleanup_tasks = [cleanup_worker(w) for w in worker_processes.keys()]
 			cleanup_results = await asyncio.gather(*cleanup_tasks)
 
 			for w, results in cleanup_results:
 				progress.update(task, description=f"Cleaned up TPU resources on worker {w}")
 
-			# Verify TPU status
 			progress.update(task, description="Verifying TPU status...")
 			final_status = await tpu.get_status()
 			console.print(
@@ -1040,14 +1014,13 @@ async def _smi_status(install_tpuinfo):
 		title="[bold magenta]TPU Utilization[/bold magenta]",
 		title_justify="left",
 	)
-	# Add columns
 	table.add_column("📟 Device Index", justify="center", style="bold blue")
 	table.add_column("💾 Memory Usage", justify="left", style="white")
 	table.add_column("⚡ Duty Cycle", justify="right", style="white")
-	# Add rows to the table
+
 	for row in table_data_sorted:
 		table.add_row(str(row[0]), row[1], row[2])
-	# Print the table
+
 	console.print(table)
 
 
@@ -1130,15 +1103,14 @@ def auto_config_ray(
 		check=True,
 		text=True,
 	)
-	# Step 1: Get internal IPs
+
 	try:
 		console.print("[yellow]Fetching internal IPs from eopod...[/yellow]")
 		internal_ips_output = subprocess.check_output(
 			"eopod get-internal-ips", shell=True, text=True
 		).strip()
 
-		# Parse the output to extract IPs (assuming one IP per line)
-		internal_ips = [ip.strip() for ip in internal_ips_output.split("\n") if ip.strip()]
+		internal_ips = [ip.strip() for ip in internal_ips_output.split(",") if ip.strip()]
 
 		if not internal_ips:
 			console.print(
@@ -1146,7 +1118,6 @@ def auto_config_ray(
 			)
 			return
 
-		# Format IPs as comma-separated string
 		internal_ips_str = ",".join(internal_ips)
 		console.print(f"[green]Found internal IPs: {internal_ips_str}[/green]")
 
@@ -1154,7 +1125,6 @@ def auto_config_ray(
 		console.print(f"[red]Failed to get internal IPs: {str(e)}[/red]")
 		return
 
-	# Step 2: Auto-detect TPU version and slice size if not provided
 	if not tpu_version or not tpu_slice:
 		try:
 			console.print("[yellow]Auto-detecting TPU configuration...[/yellow]")
@@ -1164,7 +1134,6 @@ def auto_config_ray(
 				text=True,
 			).strip()
 
-			# Parse accelerator type (format: v4-32)
 			match = re.match(r"v(\d+)-(\d+)", accelerator_type)
 			if match:
 				detected_version = match.group(1)
@@ -1192,16 +1161,13 @@ def auto_config_ray(
 				console.print("[red]TPU version and slice size are required. Exiting.[/red]")
 				return
 
-	# Step 3: Construct command with all provided arguments
-	cmd_parts = ["eopod", "run", "python", "-m", "eformer.escale.tpexec.tpu_patcher"]
+	cmd_parts = ["eopod", "run", "python", "-m", "eformer.executor.tpu_patch_ray"]
 
-	# Add all specified arguments
 	cmd_parts.extend(["--tpu-version", str(tpu_version)])
 	cmd_parts.extend(["--tpu-slice", str(tpu_slice)])
 	cmd_parts.extend(["--num-slices", str(num_slices)])
 	cmd_parts.extend(["--internal-ips", internal_ips_str])
 
-	# Add optional flags
 	if external:
 		cmd_parts.append("--external")
 	if stop:
@@ -1237,34 +1203,39 @@ def auto_config_ray(
 	"-p",
 	type=int,
 	required=True,
-	multiple=True,  # Allows specifying -p multiple times
-	help="Port number(s) to open. Can specify multiple times (e.g., -p 80 -p 443).",
+	multiple=True,
+	help="Port number(s) to open. Can be specified multiple times (e.g., -p 80 -p 443).",
 )
 @click.option(
 	"--direction",
 	type=click.Choice(["ingress", "egress", "both"], case_sensitive=False),
 	default="both",
 	show_default=True,
-	help="Direction of traffic to allow (Ingress=Incoming, Egress=Outgoing).",
+	help="Direction of traffic to allow.",
 )
 @click.option(
 	"--protocol",
 	default="tcp",
 	show_default=True,
 	type=click.Choice(["tcp", "udp", "icmp", "all"], case_sensitive=False),
-	help="Protocol to allow (tcp, udp, icmp, or all).",
+	help="Protocol to allow.",
+)
+@click.option(
+	"--target-tag",
+	default=None,
+	help="Network tag for VMs. If omitted, defaults to 'tpu-<your-tpu-name>'. IMPORTANT: VMs must have this tag!",
 )
 @click.option(
 	"--source-ranges",
 	default="0.0.0.0/0",
 	show_default=True,
-	help="Source IP CIDR range for INGRESS rules. Use cautiously!",
+	help="Source IP CIDR range for ingress rules.",
 )
 @click.option(
 	"--destination-ranges",
 	default="0.0.0.0/0",
 	show_default=True,
-	help="Destination IP CIDR range for EGRESS rules.",
+	help="Destination IP CIDR range for egress rules.",
 )
 @click.option(
 	"--priority",
@@ -1275,157 +1246,150 @@ def auto_config_ray(
 )
 @click.option(
 	"--description",
-	default=None,
+	default="Rule created by eopod",
+	show_default=True,
 	help="Description for the firewall rule.",
 )
 @click.option(
 	"--network",
 	default=None,
-	help="Network name. If omitted, attempts to detect from TPU VM config (usually 'default').",
+	help="Network name to use. If omitted, will attempt to detect from TPU configuration.",
 )
 @click.option(
 	"--update-existing/--skip-existing",
 	default=False,
 	show_default=True,
-	help="Update rule if it already exists, otherwise skip.",
+	help="Whether to update existing rules or skip them.",
+)
+@click.option(
+	"--verify-tag",
+	is_flag=True,
+	default=False,
+	help="Verify that the target tag is applied to the TPU VM before creating rules.",
 )
 @async_command
 async def open_port(
 	port,
 	direction,
 	protocol,
+	target_tag,
 	source_ranges,
 	destination_ranges,
 	priority,
 	description,
 	network,
 	update_existing,
+	verify_tag,
 ):
-	"""Creates GCP firewall rules targeting the TPU VM's Service Account."""
+	"""Creates GCP firewall rules to open ports for TPU VMs."""
 	config = EOConfig()
 	project_id, zone, tpu_name = config.get_credentials()
 
 	if not all([project_id, zone, tpu_name]):
 		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
-		return 1
+		return
 
-	safe_tpu_name = "".join(c for c in tpu_name.lower() if c.isalnum() or c == "-")
+	safe_tpu_name = tpu_name.lower()
+
+	effective_target_tag = target_tag if target_tag is not None else f"{safe_tpu_name}"
 
 	tpu_manager = TPUManager(project_id, zone, tpu_name)
 
-	tpu_service_account = await tpu_manager.get_service_account()
-	if not tpu_service_account:
-		console.print(
-			f"[red]Could not determine Service Account for TPU {tpu_name}. Aborting.[/red]"
-		)
-		return 1
-
-	detected_network = None
 	if network is None:
-		detected_network = await tpu_manager.get_network()
-		if detected_network:
-			network = detected_network
-		else:
+		try:
+			tpu_info = await tpu_manager.get_tpu_info()
+			network = tpu_info.get("networkConfig", {}).get("network", "default")
+			console.print(f"Using network: {network}")
+		except Exception as e:
 			console.print(
-				"[yellow]Could not automatically detect network. Using 'default'.[/yellow]"
+				f"[yellow]Could not determine network from TPU config: {e}[/yellow]"
 			)
+			console.print("[yellow]Using 'default' network instead[/yellow]")
 			network = "default"
+
+	if verify_tag:
+		try:
+			tpu_info = await tpu_manager.get_tpu_info()
+			vm_tags = tpu_info.get("networkConfig", {}).get("networkTags", [])
+			if effective_target_tag not in vm_tags:
+				console.print(
+					f"[red]Target tag '{effective_target_tag}' is not applied to the TPU VM![/red]"
+				)
+				console.print(
+					f"[yellow]Available tags: {', '.join(vm_tags) if vm_tags else 'None'}[/yellow]"
+				)
+				if click.confirm("Do you want to add this tag to the TPU VM?", default=False):
+					console.print("[yellow]Adding tag functionality not implemented yet[/yellow]")
+				else:
+					return
+		except Exception as e:
+			console.print(f"[yellow]Could not verify tags: {e}[/yellow]")
+			if not click.confirm("Continue without verifying tags?", default=False):
+				return
+
 	directions_to_process = (
 		["ingress", "egress"] if direction.lower() == "both" else [direction.lower()]
 	)
 
-	rule_protocol = protocol.lower()
-	ports_to_process = list(port)
+	for p in port:
+		for current_direction in directions_to_process:
+			rule_name = f"a-allow-{safe_tpu_name}-{p}-{current_direction}".lower()[:63]
 
-	rules_str = f"{rule_protocol}:{','.join(map(str, ports_to_process))}"
-	if rule_protocol in ["all", "icmp"]:
-		rules_str = rule_protocol
-		if ports_to_process:
-			console.print(
-				f"[yellow]Warning: Port numbers ignored for protocol '{rule_protocol}'.[/yellow]"
-			)
+			try:
+				cmd = f"gcloud compute firewall-rules describe {rule_name} --project={project_id} --format=json"
+				_ = await run_command(cmd, capture_output=True)
+				rule_exists = True
+				console.print(f"Rule '{rule_name}' already exists.")
 
-	console.print(f"Targeting Service Account: [info]{tpu_service_account}[/]")
-	console.print(f"Using Network: [info]{network}[/]")
-	console.print(f"Rule Protocol/Ports: [info]{rules_str}[/]")
+				if not update_existing:
+					console.print("[yellow]Skipping (use --update-existing to update)[/yellow]")
+					continue
 
-	overall_success = True
+			except Exception:
+				rule_exists = False
 
-	for current_direction in directions_to_process:
-		ports_suffix = (
-			f"-{'-'.join(map(str, ports_to_process))}"
-			if ports_to_process and rule_protocol not in ["all", "icmp"]
-			else ""
-		)
-		rule_name_base = (
-			f"allow-{safe_tpu_name}-{rule_protocol}{ports_suffix}-{current_direction}-sa"
-		)
-		rule_name = rule_name_base[:63]
-		effective_description = description
-		if not effective_description:
-			effective_description = f"Allow {rule_protocol.upper()} {current_direction.upper()} traffic on port(s) {','.join(map(str, ports_to_process)) if ports_to_process else '(all)'} for TPU {tpu_name} (via SA)"
-
-		rule_exists = False
-		try:
-			check_cmd = [
+			cmd_parts = [
 				"gcloud",
 				"compute",
 				"firewall-rules",
-				"describe",
+				"update" if rule_exists else "create",
 				rule_name,
 				f"--project={project_id}",
-				"--format=value(name)",
+				f"--direction={current_direction.upper()}",
+				f"--priority={priority}",
+				f"--network={network}",
+				"--action=ALLOW",
 			]
-			await run_command(check_cmd, capture_output=True)
-			rule_exists = True
-			console.print(f"Rule '[blue]{rule_name}[/]' already exists.")
-			if not update_existing:
-				console.print("[yellow]Skipping (use --update-existing to update)[/yellow]")
-				continue
-		except Exception:
-			rule_exists = False
 
-		cmd_parts = [
-			"gcloud",
-			"compute",
-			"firewall-rules",
-			"update" if rule_exists else "create",
-			rule_name,
-			f"--project={project_id}",
-			f"--direction={current_direction.upper()}",
-			f"--priority={priority}",
-			f"--network={network}",
-			"--action=ALLOW",
-			f"--rules={rules_str}",  # Use the combined protocol:ports string
-			f"--target-service-accounts={tpu_service_account}",
-			f"--description={quote(effective_description)}",
-		]
+			if protocol == "all":
+				cmd_parts.append("--rules=all")
+			elif protocol == "icmp":
+				cmd_parts.append("--rules=icmp")
+			else:
+				cmd_parts.append(f"--rules={protocol}:{p}")
 
-		if current_direction == "ingress":
-			cmd_parts.append(f"--source-ranges={source_ranges}")
-			if source_ranges == "0.0.0.0/0":
+			if current_direction.lower() == "ingress":
+				cmd_parts.append(f"--source-ranges={source_ranges}")
+
+			if current_direction.lower() == "egress":
+				cmd_parts.append(f"--destination-ranges={destination_ranges}")
+
+			cmd_parts.append(f"--target-tags={effective_target_tag}")
+
+			cmd_parts.append(f"--description='{description}'")
+
+			cmd = " ".join(cmd_parts)
+			console.print(f"[green]Executing:[/green]\n{cmd}")
+
+			try:
+				await run_command(cmd)
 				console.print(
-					"[bold yellow]Warning: Ingress rule allows traffic from ANY source (0.0.0.0/0).[/bold yellow]"
+					f"[green]Successfully {'updated' if rule_exists else 'created'} firewall rule '{rule_name}'[/green]"
 				)
-		elif current_direction == "egress":
-			cmd_parts.append(f"--destination-ranges={destination_ranges}")
-
-		action = "Updating" if rule_exists else "Creating"
-		console.print(f"[cyan]{action} rule '{rule_name}'...[/cyan]")
-
-		try:
-			await run_command(cmd_parts)  # Pass the list directly
-			console.print(
-				f"[green]Successfully {'updated' if rule_exists else 'created'} firewall rule '{rule_name}'[/green]"
-			)
-		except Exception as e:
-			console.print(
-				f"[red]Failed to {'update' if rule_exists else 'create'} firewall rule '{rule_name}': {e}[/red]"
-			)
-			config.save_error_log(command=" ".join(cmd_parts), error=str(e))
-			overall_success = False
-
-	return 0 if overall_success else 1
+			except Exception as e:
+				console.print(
+					f"[red]Failed to {'update' if rule_exists else 'create'} firewall rule: {e}[/red]"
+				)
 
 
 def main():
