@@ -1110,8 +1110,9 @@ def auto_config_ray(
 			"eopod get-internal-ips", shell=True, text=True
 		).strip()
 
-		internal_ips = [ip.strip() for ip in internal_ips_output.split(",") if ip.strip()]
-
+		# Sanitize the output to remove any newline or carriage return characters
+		sanitized_ips_output = internal_ips_output.replace("\n", "").replace("\r", "")
+		internal_ips = [ip.strip() for ip in sanitized_ips_output.split(",") if ip.strip()]
 		if not internal_ips:
 			console.print(
 				"[red]No internal IPs found. Make sure eopod is configured correctly.[/red]"
