@@ -1290,7 +1290,7 @@ async def open_port(
 		console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
 		return
 
-	safe_tpu_name = tpu_name.lower()
+	safe_tpu_name = tpu_name.lower().replace("_", "-")
 
 	effective_target_tag = target_tag if target_tag is not None else f"{safe_tpu_name}"
 
