@@ -24,7 +24,7 @@ from ._eopod_cli import (
 	async_command,
 )
 
-__version__ = "0.0.13"
+__version__ = "0.0.15"
 
 __all__ = (
 	"show_config",
