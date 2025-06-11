@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "eopod"
-version = "0.0.17"
+version = "0.0.18"
 
 description = "EOpod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
@@ -29,31 +29,39 @@ python = ">=3.10,<3.14"
 click = "^8.0"
 rich = "^13.7.0"
 pyyaml = "^6.0.1"
-
+ray = { version = "==2.34.0", extras = ["default"] }
 [tool.poetry.scripts]
 eopod = "eopod:main"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+"eopod" = ["py.typed"]
+
+[tool.black]
+line-length = 121
+target-version = ["py310"]
+preview = true
+
+
+[tool.ruff]
+line-length = 121
+target-version = "py310"
+
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "B"]
-ignore = ["E501", "B905", "B007"]
-unfixable = ["B"]
+select = ["A", "B", "E", "F", "I", "NPY", "RUF", "UP", "W"]
+ignore = ["F722", "B008", "UP015", "A005"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
-"**/{tests,docs,tools}/*" = ["E402"]
-"tests/*" = ["E402", "E731"]
-"benchmarks/*" = ["E402", "E731"]
 
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "tab"
-docstring-code-format = true
+[tool.mypy]
+python_version = "3.10"
 
-[tool.ruff]
-target-version = "py311"
-line-length = 88
-indent-width = 2
+ignore_missing_imports = true
+exclude = ["eopod/"]

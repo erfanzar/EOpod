@@ -13,27 +13,27 @@
 # limitations under the License.
 
 from ._eopod_cli import (
-	show_config,
-	errors,
-	history,
-	run,
-	configure,
-	main,
-	check_background,
-	kill,
-	async_command,
+    async_command,
+    check_background,
+    configure,
+    errors,
+    history,
+    kill,
+    main,
+    run,
+    show_config,
 )
 
-__version__ = "0.0.17"
+__version__ = "0.0.18"
 
 __all__ = (
-	"show_config",
-	"errors",
-	"history",
-	"run",
-	"configure",
-	"main",
-	"check_background",
-	"kill",
-	"async_command",
+    "async_command",
+    "check_background",
+    "configure",
+    "errors",
+    "history",
+    "kill",
+    "main",
+    "run",
+    "show_config",
 )
