@@ -1098,7 +1098,7 @@ def auto_config_ray(
 
 	console.print("[yellow]making sure eformer is installed on all pods...[/yellow]")
 	subprocess.run(
-		["eopod run pip install eformer -qU"],
+		["~/.local/bin/eopod run pip install eformer -qU"],
 		shell=True,
 		check=True,
 		text=True,
@@ -1107,7 +1107,7 @@ def auto_config_ray(
 	try:
 		console.print("[yellow]Fetching internal IPs from eopod...[/yellow]")
 		internal_ips_output = subprocess.check_output(
-			"eopod get-internal-ips", shell=True, text=True
+			"~/.local/bin/eopod get-internal-ips", shell=True, text=True
 		).strip()
 
 		# Sanitize the output to remove any newline or carriage return characters
@@ -1162,7 +1162,13 @@ def auto_config_ray(
 				console.print("[red]TPU version and slice size are required. Exiting.[/red]")
 				return
 
-	cmd_parts = ["eopod", "run", "python", "-m", "eformer.executor.tpu_patch_ray"]
+	cmd_parts = [
+		"~/.local/bin/eopod",
+		"run",
+		"python",
+		"-m",
+		"eformer.executor.tpu_patch_ray",
+	]
 
 	cmd_parts.extend(["--tpu-version", str(tpu_version)])
 	cmd_parts.extend(["--tpu-slice", str(tpu_slice)])
