@@ -24,7 +24,7 @@ from ._eopod_cli import (
     show_config,
 )
 
-__version__ = "0.0.19"
+__version__ = "0.0.20"
 
 __all__ = (
     "async_command",

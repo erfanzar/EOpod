@@ -1008,6 +1008,24 @@ async def smi(install_tpuinfo):
 
 
 @cli.command()
+@async_command
+async def clean_logs():
+    """Clean up logs and temporary files on the TPU VM"""
+    config = EOConfig()
+    project_id, zone, tpu_name = config.get_credentials()
+
+    if not all([project_id, zone, tpu_name]):
+        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        return
+
+    tpu = TPUManager(project_id, zone, tpu_name)
+    command = """
+    sudo bash -c 'echo "[*] Vacuuming journal logs (keeping 1 second)..." && journalctl --vacuum-time=1s && echo "[*] Deleting rotated/compressed logs..." && find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" -o -name "*.bak" -o -name "*-????????" -o -name "*.log.[0-9]*" \) -print -delete && echo "[*] Truncating active log files..." && find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; && echo "[*] Vacuuming journal logs to 50MB cap..." && journalctl --vacuum-size=5M && docker system prune -af --volumes && echo "[✔] Cleanup complete."'
+    """
+    await tpu.execute_command(command.strip(), stream=False)
+
+
+@cli.command()
 @click.option("--external", is_flag=True, help="Use external IPs instead of internal IPs")
 @click.option("--stop", is_flag=True, help="Stop the Ray cluster")
 @click.option("--verify", is_flag=True, help="Verify the Ray cluster setup")
