@@ -19,7 +19,9 @@ import logging
 import os
 import pathlib
 import shlex
+import shutil
 import subprocess
+import sys
 from datetime import datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
@@ -42,7 +44,27 @@ logging.basicConfig(
 
 
 HOME = str(pathlib.Path.home())
-EOPOD_PATH = f"{HOME}/.local/bin/eopod"
+
+
+def find_eopod_in_current_env() -> pathlib.Path:
+    """Return the absolute path to 'eopod' inside the current venv (or system)."""
+    if eopod := os.getenv("EOPOD_EXECUTABLE_PATH"):
+        return pathlib.Path(eopod).expanduser().resolve()
+
+    bin_dir = pathlib.Path(sys.executable).parent
+    eopod_path = bin_dir / "eopod"
+
+    if eopod_path.is_file():
+        return eopod_path
+
+    eopod_path = shutil.which("eopod")
+    if eopod_path:
+        return pathlib.Path(eopod_path)
+
+    raise FileNotFoundError("eopod executable could not be located")
+
+
+EOPOD_PATH = find_eopod_in_current_env()
 
 
 def list2cmdline(seq):

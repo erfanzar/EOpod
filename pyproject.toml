@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "eopod"
-version = "0.0.23"
+version = "0.0.25"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 description = "eopod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
 readme = "README.md"
@@ -26,7 +26,7 @@ dependencies = [
 	"click>=8.0",
 	"rich>=13.7.0",
 	"pyyaml>=6.0.1",
-	"eformer==0.0.43",
+	"eformer==0.0.44",
 ]
 
 [project.urls]

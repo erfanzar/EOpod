@@ -629,6 +629,7 @@ async def clean_logs():
 @click.option("--external-ips", help="Comma-separated list of external IPs")
 @click.option("--self-job", is_flag=True, help="Run only on the current machine (no SSH)")
 @click.option("--slice-config", help="Path to YAML config file with slice configurations")
+@click.option("--python-path", help="Path to venv or python interpreter")
 def auto_config_ray(
     external,
     stop,
@@ -642,6 +643,7 @@ def auto_config_ray(
     external_ips,
     self_job,
     slice_config,
+    python_path,
 ):
     """
     Auto-configure Ray on TPU cluster using internal IPs from current setup.
@@ -706,7 +708,7 @@ def auto_config_ray(
     cmd_parts = [
         EOPOD_PATH,
         "run",
-        "python",
+        python_path or "python",
         "-m",
         "eformer.executor.tpu_patch_ray",
     ]
