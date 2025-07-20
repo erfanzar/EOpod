@@ -315,7 +315,7 @@ wheels = [
 
 [[package]]
 name = "eformer"
-version = "0.0.43"
+version = "0.0.44"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chex" },
@@ -328,14 +328,14 @@ dependencies = [
     { name = "ray", extra = ["default"] },
     { name = "tblib" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/aa/586c4a84d908a454493941f7d9738f68b0706b48cb034052a270964c2772/eformer-0.0.43.tar.gz", hash = "sha256:b003fd0cac4955f0343b7ccb4bb4ef3e1453e2570b9e0da65e8d8dc5ba33bea4", size = 99142, upload-time = "2025-07-20T13:48:22.28Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/74/63bb768c063f897b5592f21a261f8174e765e2101cab1c9ecd3bfa2fff29/eformer-0.0.44.tar.gz", hash = "sha256:ad4334435f8a1cc08c746696b4a63b4bc883a736c51487684c891b523fbdfdfd", size = 99347, upload-time = "2025-07-20T14:11:24.844Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/f8/f0726dd4577ba5172d3a3a52aa793a718c1819c80b6cbaf2bbff8d35778b/eformer-0.0.43-py3-none-any.whl", hash = "sha256:84d2215dacc0a665b71c7027d1d63d3d0fb5a34ca35498bb3631df3daf8b6389", size = 138422, upload-time = "2025-07-20T13:48:20.126Z" },
+    { url = "https://files.pythonhosted.org/packages/09/42/47e6c8774543ba93250305aa6fa43412b2c6c1d18224a7013b62ea11e752/eformer-0.0.44-py3-none-any.whl", hash = "sha256:15a9befa4ac23eff4861605f056eaadf110e950cf328ce1bbf2720fe7c1cab4a", size = 138602, upload-time = "2025-07-20T14:11:22.984Z" },
 ]
 
 [[package]]
 name = "eopod"
-version = "0.0.23"
+version = "0.0.25"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -347,7 +347,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
-    { name = "eformer", specifier = "==0.0.43" },
+    { name = "eformer", specifier = "==0.0.44" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "rich", specifier = ">=13.7.0" },
 ]
