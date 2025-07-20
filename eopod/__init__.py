@@ -12,28 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._eopod_cli import (
-    async_command,
-    check_background,
-    configure,
-    errors,
-    history,
-    kill,
-    main,
-    run,
-    show_config,
-)
-
-__version__ = "0.0.20"
-
-__all__ = (
-    "async_command",
-    "check_background",
-    "configure",
-    "errors",
-    "history",
-    "kill",
-    "main",
-    "run",
-    "show_config",
-)
+__version__ = "0.0.21"

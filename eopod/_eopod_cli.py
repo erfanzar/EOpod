@@ -1,4 +1,4 @@
-# Copyright 2023 The EASYDEL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/eopod Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -10,40 +10,26 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.#
+# limitations under the License.
 
 import asyncio
-import configparser
-import json
 import logging
-import os
-import pathlib
 import re
 import shlex
 import subprocess
 from datetime import datetime
-from functools import wraps
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 import click
 import yaml
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.theme import Theme
 
-console = Console(
-    theme=Theme(
-        {
-            "info": "cyan",
-            "warning": "yellow",
-            "error": "white",
-            "success": "green",
-        }
-    )
-)
+from ._utils import EOPOD_PATH, EOConfig, TPUManager, async_command, run_command
+
+console = Console(theme=Theme({"info": "cyan", "warning": "yellow", "error": "white", "success": "green"}))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,377 +37,10 @@ logging.basicConfig(
     handlers=[RichHandler(console=console, rich_tracebacks=True)],
 )
 
-HOME = str(pathlib.Path.home())
-EOPOD_PATH = f"{HOME}/.local/bin/eopod"
-
-
-def list2cmdline(seq):
-    result = []
-    needquote = False
-    for arg in map(os.fsdecode, seq):
-        bs_buf = []
-        if result:
-            result.append(" ")
-        needquote = (" " in arg) or ("\t" in arg) or not arg
-        if needquote:
-            result.append('"')
-        for c in arg:
-            if c == "\\":
-                bs_buf.append(c)
-            elif c == '"':
-                result.append("\\" * len(bs_buf) * 2)
-                bs_buf = []
-                result.append('\\"')
-            else:
-                if bs_buf:
-                    result.extend(bs_buf)
-                    bs_buf = []
-                result.append(c)
-        if bs_buf:
-            result.extend(bs_buf)
-        if needquote:
-            result.extend(bs_buf)
-            result.append('"')
-    return "".join(result)
-
-
-def clean_tqdm_output(line: str) -> str:
-    """Clean up TQDM progress bar output to show only the latest state."""
-    if "\r" in line:
-        return line.rstrip().split("\r")[-1]
-    return line.rstrip()
-
-
-def is_tqdm_line(line: str) -> bool:
-    """Check if a line contains TQDM progress bar."""
-    return "%|" in line and "it/s]" in line
-
-
-class TPUManager:
-    def __init__(self, project_id: str, zone: str, tpu_name: str):
-        self.project_id = project_id
-        self.zone = zone
-        self.tpu_name = tpu_name
-
-    async def get_status(self) -> dict:
-        cmd = [
-            "gcloud",
-            "compute",
-            "tpus",
-            "describe",
-            self.tpu_name,
-            f"--zone={self.zone}",
-            f"--project={self.project_id}",
-            "--format=json",
-        ]
-
-        console.print("[yellow]Fetching TPU status...[/yellow]")
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            status = json.loads(stdout)
-            console.print(f"TPU state: [success]{status.get('state', 'UNKNOWN')}[/]")
-            return status
-        else:
-            error_message = stderr.decode()
-            console.print(f"[red]Failed to get TPU status[/]: {error_message}")
-            raise RuntimeError(f"Failed to get TPU status: {error_message}")
-
-    async def execute_command(
-        self,
-        command: str,
-        worker: str = "all",
-        stream: bool = False,
-        background: bool = False,
-    ) -> tuple:
-        if background:
-            command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
-
-        cmd = [
-            "gcloud",
-            "compute",
-            "tpus",
-            "tpu-vm",
-            "ssh",
-            self.tpu_name,
-            f"--zone={self.zone}",
-            f"--worker={worker}",
-            f"--project={self.project_id}",
-            f"--command={command}",
-        ]
-
-        console.print(f"Executing command on worker {worker}: [info]{command}[/]")
-        if stream:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                console=console,
-            ) as progress:
-                exit_code = os.system(list2cmdline(cmd))
-                if exit_code == 0:
-                    progress.print("[blue]Command completed successfully[/]")
-                else:
-                    progress.print("[red]Command failed[/]")
-
-                return exit_code, "", ""
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode == 0:
-                if background:
-                    pid = stdout.decode().strip()
-                    console.print(f"Background process started with PID: [success]{pid}[/]")
-                    return process.returncode, pid, stderr.decode()
-                else:
-                    console.print("[success]Command completed successfully[/]")
-                    return process.returncode, stdout.decode(), stderr.decode()
-            else:
-                console.print(f"[red]Command failed: {stderr.decode()}[/]")
-                return process.returncode, stdout.decode(), stderr.decode()
-
-    async def get_tpu_details(self) -> dict:
-        """Fetch detailed information about the TPU."""
-        cmd = [
-            "gcloud",
-            "compute",
-            "tpus",
-            "describe",
-            self.tpu_name,
-            f"--zone={self.zone}",
-            f"--project={self.project_id}",
-            "--format=json",
-        ]
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        stdout, stderr = await process.communicate()
-        if process.returncode == 0:
-            return json.loads(stdout)
-        else:
-            error_message = stderr.decode()
-            console.print(f"[red]Failed to fetch TPU details[/]: {error_message}")
-            raise RuntimeError(f"Failed to fetch TPU details: {error_message}")
-
-    async def get_internal_ips(self) -> dict:
-        """Get internal IP addresses of TPU workers."""
-        try:
-            tpu_details = await self.get_tpu_details()
-            network_endpoints = tpu_details.get("networkEndpoints", [])
-            if not network_endpoints:
-                console.print("[yellow]No network endpoints found for the TPU[/yellow]")
-                return {}
-
-            internal_ips = {}
-            for idx, endpoint in enumerate(network_endpoints):
-                worker_id = f"worker-{idx}"
-                internal_ip = endpoint.get("ipAddress")
-                if internal_ip:
-                    internal_ips[worker_id] = internal_ip
-                else:
-                    console.print(f"[yellow]No internal IP found for {worker_id}[/yellow]")
-
-            return internal_ips
-        except Exception as e:
-            console.print(f"[red]Error fetching internal IPs: {e!s}[/red]")
-            raise
-
-    async def get_external_ips(self) -> dict:
-        """Get external IP addresses of TPU workers."""
-        try:
-            cmd = [
-                "gcloud",
-                "compute",
-                "tpus",
-                "tpu-vm",
-                "describe",
-                self.tpu_name,
-                f"--zone={self.zone}",
-                f"--project={self.project_id}",
-                '--format="value(networkEndpoints[].accessConfig.externalIp)"',
-            ]
-            string_command = " ".join(cmd)
-            process = subprocess.run(string_command, shell=True, capture_output=True, text=True)
-            return process.stdout.replace(";", ",").strip()
-        except Exception as e:
-            console.print(f"[red]Error fetching external IPs: {e!s}[/red]")
-            raise
-
-    def format_ips_comma_separated(self, ips: dict) -> str:
-        """Format IP addresses as a comma-separated string."""
-        return ",".join(ips.values())
-
-    def display_ips(self, ips: dict, ip_type: str, output_format: str = "table"):
-        """Display IP addresses in the specified format."""
-        if not ips:
-            console.print(f"[yellow]No {ip_type} IPs found[/yellow]")
-            return
-
-        if output_format == "comma":
-            comma_separated_ips = self.format_ips_comma_separated(ips)
-            console.print(f"{comma_separated_ips}")
-        else:
-            table = Table(title=f"{ip_type.capitalize()} IP Addresses")
-            table.add_column("Worker", style="cyan")
-            table.add_column(f"{ip_type.capitalize()} IP", style="info")
-            for worker, ip in ips.items():
-                table.add_row(worker, ip)
-            console.print(table)
-
-
-class AsyncContext:
-    def __init__(self, delay):
-        self.delay = delay
-
-    async def __aenter__(self):
-        await asyncio.sleep(self.delay)
-        return self.delay
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await asyncio.sleep(self.delay)
-
-
-TestAsyncContext = AsyncContext
-
-
-def async_command(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        return asyncio.run(fn(*args, **kwargs))
-
-    return wrapper
-
-
-async def run_command(command, capture_output=False):
-    """Run a command locally and return the result."""
-    process = await asyncio.create_subprocess_exec(
-        *shlex.split(command),
-        stdout=asyncio.subprocess.PIPE if capture_output else None,
-        stderr=asyncio.subprocess.PIPE if capture_output else None,
-    )
-
-    if capture_output:
-        stdout, stderr = await process.communicate()
-        if process.returncode != 0:
-            error_msg = stderr.decode()
-            raise Exception(f"Command failed with exit code {process.returncode}: {error_msg}")
-        return stdout.decode()
-    else:
-        await process.communicate()
-        if process.returncode != 0:
-            raise Exception(f"Command failed with exit code {process.returncode}")
-        return None
-
-
-class EOConfig:
-    def __init__(self):
-        self.config_dir = Path.home() / ".eopod"
-        self.config_file = self.config_dir / "config.ini"
-        self.history_file = self.config_dir / "history.yaml"
-        self.error_log_file = self.config_dir / "error_log.yaml"
-        self.log_file = self.config_dir / "eopod.log"
-        self.ensure_config_dir()
-        self.config = self.load_config()
-        self.setup_logging()
-
-    def setup_logging(self):
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(message)s",
-            handlers=[
-                RichHandler(rich_tracebacks=True),
-                RotatingFileHandler(
-                    self.log_file,
-                    maxBytes=1024 * 1024,
-                    backupCount=5,
-                ),
-            ],
-        )
-
-    def ensure_config_dir(self):
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-
-    def load_config(self):
-        config = configparser.ConfigParser()
-        if self.config_file.exists():
-            config.read(self.config_file)
-        return config
-
-    def save_config(self):
-        with open(self.config_file, "w") as f:
-            self.config.write(f)
-
-    def get_credentials(self):
-        if "DEFAULT" not in self.config:
-            return None, None, None
-        return (
-            self.config["DEFAULT"].get("project_id"),
-            self.config["DEFAULT"].get("zone"),
-            self.config["DEFAULT"].get("tpu_name"),
-        )
-
-    def save_command_history(self, command: str, status: str, output: str):
-        history = []
-        if self.history_file.exists():
-            with open(self.history_file, "r") as f:
-                history = yaml.safe_load(f) or []
-
-        history.append(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "command": command,
-                "status": status,
-                "output": output[:500],
-            }
-        )
-
-        history = history[-100:]
-
-        with open(self.history_file, "w") as f:
-            yaml.dump(history, f)
-
-    def save_error_log(self, command: str, error: str):
-        """Saves error details to a separate error log."""
-        error_log = []
-        if self.error_log_file.exists():
-            with open(self.error_log_file, "r") as f:
-                try:
-                    error_log = yaml.safe_load(f) or []
-                except yaml.YAMLError as e:
-                    console.print(f"[red]Error loading error log: {e}[/red]")
-                    error_log = []
-
-        error_log.append(
-            {
-                "timestamp": datetime.now().isoformat(),
-                "command": command,
-                "error": error,
-            }
-        )
-
-        error_log = error_log[-50:]
-
-        with open(self.error_log_file, "w") as f:
-            yaml.dump(error_log, f)
-
 
 @click.group()
 def cli():
-    """EOpod - Enhanced TPU Command Runner"""
+    """eopod - Enhanced TPU Command Runner"""
     pass
 
 
@@ -430,9 +49,8 @@ def cli():
 @click.option("--zone", help="Google Cloud Zone (optional if running on GCP)")
 @click.option("--tpu-name", required=True, help="TPU Name")
 def configure(project_id, zone, tpu_name):
-    """Configure EOpod with your Google Cloud details"""
+    """Configure eopod with your Google Cloud details"""
     import re
-    import subprocess
 
     config = EOConfig()
     if "DEFAULT" not in config.config:
@@ -478,10 +96,7 @@ def configure(project_id, zone, tpu_name):
 
 @cli.command()
 @click.option(
-    "--format",
-    type=click.Choice(["table", "comma"]),
-    default="comma",
-    help="Output format: 'table' or 'comma'",
+    "--format", type=click.Choice(["table", "comma"]), default="comma", help="Output format: 'table' or 'comma'"
 )
 @async_command
 async def get_internal_ips(format):  # noqa
@@ -502,10 +117,7 @@ async def get_internal_ips(format):  # noqa
 
 @cli.command()
 @click.option(
-    "--format",
-    type=click.Choice(["table", "comma"]),
-    default="comma",
-    help="Output format: 'table' or 'comma'",
+    "--format", type=click.Choice(["table", "comma"]), default="comma", help="Output format: 'table' or 'comma'"
 )
 @async_command
 async def get_external_ips(format):  # noqa
@@ -546,7 +158,7 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
@@ -664,7 +276,7 @@ async def check_background(pid_args, worker):
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
@@ -696,7 +308,7 @@ async def kill(pid_args, worker, force):
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
@@ -720,7 +332,7 @@ async def status():
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     try:
@@ -768,22 +380,9 @@ def history():
 
 
 @cli.command()
-@click.option(
-    "--worker",
-    default="all",
-    help='Specific worker or "all"',
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Force kill all processes",
-)
-@click.option(
-    "--pid",
-    multiple=True,
-    type=int,
-    help="Specific PIDs to kill",
-)
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@click.option("--force", is_flag=True, help="Force kill all processes")
+@click.option("--pid", multiple=True, type=int, help="Specific PIDs to kill")
 @async_command
 async def kill_tpu(worker, force, pid):
     """Kill processes using TPU resources"""
@@ -791,7 +390,7 @@ async def kill_tpu(worker, force, pid):
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
@@ -954,7 +553,7 @@ async def _smi_status(install_tpuinfo):
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
@@ -986,22 +585,14 @@ async def _smi_status(install_tpuinfo):
 
 
 @cli.command()
-@click.option(
-    "--install-tpuinfo",
-    is_flag=True,
-    help="installs tpu-info (for first time only).",
-)
+@click.option("--install-tpuinfo", is_flag=True, help="installs tpu-info (for first time only).")
 @async_command
 async def show_tpu_usage(install_tpuinfo):
     await _smi_status(install_tpuinfo)
 
 
 @cli.command()
-@click.option(
-    "--install-tpuinfo",
-    is_flag=True,
-    help="installs tpu-info (for first time only).",
-)
+@click.option("--install-tpuinfo", is_flag=True, help="installs tpu-info (for first time only).")
 @async_command
 async def smi(install_tpuinfo):
     await _smi_status(install_tpuinfo)
@@ -1015,13 +606,13 @@ async def clean_logs():
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     tpu = TPUManager(project_id, zone, tpu_name)
     command = """
     sudo bash -c 'echo "[*] Vacuuming journal logs (keeping 1 second)..." && journalctl --vacuum-time=1s && echo "[*] Deleting rotated/compressed logs..." && find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" -o -name "*.bak" -o -name "*-????????" -o -name "*.log.[0-9]*" \) -print -delete && echo "[*] Truncating active log files..." && find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; && echo "[*] Vacuuming journal logs to 50MB cap..." && journalctl --vacuum-size=5M && docker system prune -af --volumes && echo "[✔] Cleanup complete."'
-    """
+    """  # noqa
     await tpu.execute_command(command.strip(), stream=False)
 
 
@@ -1031,21 +622,12 @@ async def clean_logs():
 @click.option("--verify", is_flag=True, help="Verify the Ray cluster setup")
 @click.option("--tpu-version", help="Set TPU version (auto-detected if not provided)")
 @click.option("--tpu-slice", type=int, help="Set TPU slice size (auto-detected if not provided)")
-@click.option(
-    "--num-slices",
-    type=int,
-    default=1,
-    help="Number of TPU slices to combine (default: 1)",
-)
+@click.option("--num-slices", type=int, default=1, help="Number of TPU slices to combine (default: 1)")
 @click.option("--ssh-user", help="SSH username to use")
 @click.option("--config", help="Path to YAML config file with IP addresses")
 @click.option("--test-ssh", is_flag=True, help="Test SSH connectivity to all nodes")
 @click.option("--external-ips", help="Comma-separated list of external IPs")
-@click.option(
-    "--self-job",
-    is_flag=True,
-    help="Run only on the current machine (no SSH)",
-)
+@click.option("--self-job", is_flag=True, help="Run only on the current machine (no SSH)")
 @click.option("--slice-config", help="Path to YAML config file with slice configurations")
 def auto_config_ray(
     external,
@@ -1066,22 +648,12 @@ def auto_config_ray(
     Automatically detects TPU version and slice size if not specified.
     """
     import re
-    import shlex
     import subprocess
-
-    console.print("[yellow]making sure eformer is installed on all pods...[/yellow]")
-    subprocess.run(
-        [f"{EOPOD_PATH} run pip install eformer -qU"],
-        shell=True,
-        check=True,
-        text=True,
-    )
 
     try:
         console.print("[yellow]Fetching internal IPs from eopod...[/yellow]")
         internal_ips_output = subprocess.check_output(f"{EOPOD_PATH} get-internal-ips", shell=True, text=True).strip()
 
-        # Sanitize the output to remove any newline or carriage return characters
         sanitized_ips_output = internal_ips_output.replace("\n", "").replace("\r", "")
         internal_ips = [ip.strip() for ip in sanitized_ips_output.split(",") if ip.strip()]
         if not internal_ips:
@@ -1262,7 +834,7 @@ async def open_port(
     project_id, zone, tpu_name = config.get_credentials()
 
     if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure EOpod first using 'eopod configure'[/red]")
+        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
     safe_tpu_name = tpu_name.lower().replace("_", "-")
@@ -1360,7 +932,7 @@ async def open_port(
 
 def main():
     """
-    Main entry point for the EOpod CLI.
+    Main entry point for the eopod CLI.
     """
     try:
         asyncio.run(cli())

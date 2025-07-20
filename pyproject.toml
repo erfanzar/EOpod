@@ -1,18 +1,16 @@
-[tool.poetry]
+[build-system]
+requires = ["uv_build>=0.7.19,<0.8.0"]
+build-backend = "uv_build"
+
+[project]
 name = "eopod"
-version = "0.0.20"
-
-description = "EOpod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
-authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
-license = "Apache-2.0"
+version = "0.0.21"
+authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
+description = "eopod is a streamlined command execution tool designed to run and manage operations on Google Cloud Pods efficiently"
 readme = "README.md"
-
-homepage = "https://github.com/erfanzar/EOpod"
-repository = "https://github.com/erfanzar/EOpod"
-documentation = "https://eopod.readthedocs.io/en/latest/"
-
-keywords = ["EOpod"]
-
+requires-python = ">=3.10,<3.14"
+license = { text = "Apache-2.0" }
+keywords = ["eopod"]
 classifiers = [
 	"Development Status :: 3 - Alpha",
 	"Intended Audience :: Developers",
@@ -24,18 +22,28 @@ classifiers = [
 	"Programming Language :: Python :: 3.13",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.14"
-click = "^8.0"
-rich = "^13.7.0"
-pyyaml = "^6.0.1"
-ray = { version = "==2.46.0", extras = ["default"] }
-[tool.poetry.scripts]
+dependencies = [
+	"click>=8.0",
+	"rich>=13.7.0",
+	"pyyaml>=6.0.1",
+	"eformer==0.0.42",
+]
+
+[project.urls]
+Homepage = "https://github.com/erfanzar/eopod"
+Repository = "https://github.com/erfanzar/eopod"
+Documentation = "https://eopod.readthedocs.io/en/latest/"
+
+[project.scripts]
 eopod = "eopod:main"
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.uv.build-backend]
+module-name = "eopod"
+module-root = "."
+
+[tool.setuptools]
+package-dir = { "" = "." }
+
 [tool.setuptools.packages.find]
 where = ["."]
 
@@ -47,11 +55,9 @@ line-length = 121
 target-version = ["py310"]
 preview = true
 
-
 [tool.ruff]
 line-length = 121
 target-version = "py310"
-
 
 [tool.ruff.lint]
 select = ["A", "B", "E", "F", "I", "NPY", "RUF", "UP", "W"]
@@ -62,6 +68,5 @@ ignore = ["F722", "B008", "UP015", "A005"]
 
 [tool.mypy]
 python_version = "3.10"
-
 ignore_missing_imports = true
 exclude = ["eopod/"]

@@ -1,10 +1,10 @@
-# EOpod: Enhanced TPU Command Runner
+# eopod: Enhanced TPU Command Runner
 
-EOpod is a command-line tool designed to simplify and enhance interaction with Google Cloud TPU VMs. It provides real-time output streaming, background process management, and robust error handling.
+eopod is a command-line tool designed to simplify and enhance interaction with Google Cloud TPU VMs. It provides real-time output streaming, background process management, and robust error handling.
 
 ## Features
 
-* **Configuration Management:** Easily configure EOpod with your Google Cloud project ID, zone, and TPU name.
+* **Configuration Management:** Easily configure eopod with your Google Cloud project ID, zone, and TPU name.
 * **Command Execution:** Run commands on TPU VMs with advanced features like retries, delays, timeouts, and worker selection.
 * **Interactive Mode (Experimental):** Run commands in an interactive SSH session (use with caution).
 * **Command History:** View a history of executed commands, their status, and truncated output.
@@ -19,7 +19,7 @@ pip install eopod
 
 ## Configuration
 
-Before using EOpod, configure it with your Google Cloud credentials:
+Before using eopod, configure it with your Google Cloud credentials:
 
 ```bash
 eopod configure --project-id YOUR_PROJECT_ID --zone YOUR_ZONE --tpu-name YOUR_TPU_NAME
@@ -141,7 +141,7 @@ eopod show-config
   * `--no-stream`: Disable output streaming
   * `--background`: Run command in background
 
-* `configure`: Set up EOpod configuration
+* `configure`: Set up eopod configuration
 
   ```bash
   eopod configure --project-id ID --zone ZONE --tpu-name NAME
@@ -180,7 +180,7 @@ eopod show-config
 
 ## Error Handling
 
-EOpod includes built-in error handling and retry mechanisms:
+eopod includes built-in error handling and retry mechanisms:
 
 * Automatic retry for failed commands
 * Timeout handling
