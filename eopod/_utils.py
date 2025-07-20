@@ -64,7 +64,7 @@ def find_eopod_in_current_env() -> pathlib.Path:
     raise FileNotFoundError("eopod executable could not be located")
 
 
-EOPOD_PATH = find_eopod_in_current_env()
+EOPOD_PATH = str(find_eopod_in_current_env())
 
 
 def list2cmdline(seq):
