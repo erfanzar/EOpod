@@ -305,6 +305,15 @@ wheels = [
 ]
 
 [[package]]
+name = "contextlib2"
+version = "21.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c7/13/37ea7805ae3057992e96ecb1cffa2fa35c2ef4498543b846f90dd2348d8f/contextlib2-21.6.0.tar.gz", hash = "sha256:ab1e2bfe1d01d968e1b7e8d9023bc51ef3509bba217bb730cee3827e1ee82869", size = 43795, upload-time = "2021-06-27T06:54:40.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/56/6d6872f79d14c0cb02f1646cbb4592eef935857c0951a105874b7b62a0c3/contextlib2-21.6.0-py2.py3-none-any.whl", hash = "sha256:3fbdb64466afd23abaf6c977627b75b6139a5a3e8ce38405c5b413aed7a0471f", size = 13277, upload-time = "2021-06-27T06:54:20.972Z" },
+]
+
+[[package]]
 name = "distlib"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -315,10 +324,11 @@ wheels = [
 
 [[package]]
 name = "eformer"
-version = "0.0.44"
+version = "0.0.46"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chex" },
+    { name = "contextlib2" },
     { name = "jax" },
     { name = "mergedeep" },
     { name = "ml-collections" },
@@ -328,14 +338,14 @@ dependencies = [
     { name = "ray", extra = ["default"] },
     { name = "tblib" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ce/74/63bb768c063f897b5592f21a261f8174e765e2101cab1c9ecd3bfa2fff29/eformer-0.0.44.tar.gz", hash = "sha256:ad4334435f8a1cc08c746696b4a63b4bc883a736c51487684c891b523fbdfdfd", size = 99347, upload-time = "2025-07-20T14:11:24.844Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/29/acc547d49a0d20daada3a1ca3539a7683f03490bf6182738cf4018b1adbf/eformer-0.0.46.tar.gz", hash = "sha256:ad53214e5311c8a74400353b5c9cb408b9a6b0439c4525661dbf5ec6b824e2cd", size = 99385, upload-time = "2025-07-21T16:13:29.008Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/42/47e6c8774543ba93250305aa6fa43412b2c6c1d18224a7013b62ea11e752/eformer-0.0.44-py3-none-any.whl", hash = "sha256:15a9befa4ac23eff4861605f056eaadf110e950cf328ce1bbf2720fe7c1cab4a", size = 138602, upload-time = "2025-07-20T14:11:22.984Z" },
+    { url = "https://files.pythonhosted.org/packages/92/ba/bb01bf2c0ae1feb0a859fddbc9900ed058259e5319bb97ef3165a30fa4d5/eformer-0.0.46-py3-none-any.whl", hash = "sha256:8ba808f005ddc29f71b9df36ea3071322e2949ff4a9d000abd138c82b7aad355", size = 138615, upload-time = "2025-07-21T16:13:27.263Z" },
 ]
 
 [[package]]
 name = "eopod"
-version = "0.0.25"
+version = "0.0.28"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -347,7 +357,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.0" },
-    { name = "eformer", specifier = "==0.0.44" },
+    { name = "eformer", specifier = "==0.0.46" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "rich", specifier = ">=13.7.0" },
 ]

@@ -678,7 +678,7 @@ def auto_config_ray(
                 text=True,
             ).strip()
 
-            match = re.match(r"v(\d+)-(\d+)", accelerator_type)
+            match = re.match(r"v(\d+[a-zA-Z]?)-(\d+)", accelerator_type)
             if match:
                 detected_version = match.group(1)
                 detected_slice = int(match.group(2))
