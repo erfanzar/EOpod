@@ -875,7 +875,7 @@ def auto_config_ray(
             cmd = [
                 python_path or PYTHON_PATH,
                 "-m",
-                "eformer.executor.tpu_patch_ray",
+                "eformer.executor.patch_tpus_ray",
                 "--self-job",
                 "--head-only" if not head_has_tpu else "",
                 "--head-node-ip",
@@ -891,7 +891,7 @@ def auto_config_ray(
         cmd_parts = [
             python_path or PYTHON_PATH,
             "-m",
-            "eformer.executor.tpu_patch_ray",
+            "eformer.executor.patch_tpus_ray",
             "--tpu-version",
             tpu_version or "v4",
             "--tpu-slice",
@@ -947,7 +947,7 @@ def auto_config_ray(
                 "run",
                 python_path or PYTHON_PATH,
                 "-m",
-                "eformer.executor.tpu_patch_ray",
+                "eformer.executor.patch_tpus_ray",
                 "--head-only",
                 "--self-job",
             ]
@@ -1047,7 +1047,7 @@ def auto_config_ray(
             "run",
             python_path or PYTHON_PATH,
             "-m",
-            "eformer.executor.tpu_patch_ray",
+            "eformer.executor.patch_tpus_ray",
         ]
 
         cmd_parts.extend(["--tpu-version", str(tpu_version)])
