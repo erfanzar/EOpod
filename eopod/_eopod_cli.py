@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import pathlib
 import re
 import shlex
 import subprocess
@@ -24,11 +25,13 @@ import click
 import yaml
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Prompt
 from rich.table import Table
 from rich.theme import Theme
 
-from ._utils import EOPOD_PATH, EOConfig, TPUManager, async_command, run_command
+from ._utils import EOPOD_PATH, PYTHON_PATH, EOConfig, TPUManager, async_command, run_command
 
 console = Console(theme=Theme({"info": "cyan", "warning": "yellow", "error": "white", "success": "green"}))
 
@@ -41,6 +44,17 @@ logging.basicConfig(
 def cli():
     """eopod - Enhanced TPU Command Runner"""
     pass
+
+
+def _get_config_and_manager():
+    config = EOConfig()
+    project_id, zone, tpu_name = config.get_credentials()
+    if not all([project_id, zone, tpu_name]):
+        console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
+        return
+
+    tpu_manager = TPUManager(project_id, zone, tpu_name)
+    return config, tpu_manager
 
 
 @cli.command()
@@ -93,43 +107,60 @@ def configure(project_id, zone, tpu_name):
     console.print("[green]Configuration saved successfully![/green]")
 
 
+async def _install_package_uv(packages, uv_location):
+    """
+    Install one or more Python packages via uv on TPU workers.
+
+    Example:
+        install-package-uv torch numpy
+    """
+    _, tpu_manager = _get_config_and_manager()
+
+    if uv_location is None:
+        uv_location = str(pathlib.Path().home() / ".local" / "bin" / "uv")
+
+    packages_str = " ".join(packages)
+
+    cmd = f"{uv_location} pip install --python {PYTHON_PATH} {packages_str}"
+    await tpu_manager.execute_command(cmd)
+
+
 @cli.command()
+@click.argument("packages", nargs=-1, required=True)
 @click.option(
-    "--format",
-    type=click.Choice(["table", "comma"]),
-    default="comma",
-    help="Output format: 'table' or 'comma'",
+    "--uv-location",
+    default=None,
+    help="Path to uv executable (default: ~/.local/bin/uv)",
 )
 @async_command
-async def get_internal_ips(format):  # noqa
-    """Get internal IP addresses of TPU workers."""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
-        return
+async def install_package_uv(packages, uv_location):
+    """
+    Install one or more Python packages via uv on TPU workers.
 
-    tpu_manager = TPUManager(project_id, zone, tpu_name)
+    Example:
+        install-package-uv torch numpy
+    """
+    await _install_package_uv(packages, uv_location)
+
+
+@cli.command()
+@async_command
+async def get_internal_ips():
+    """Get internal IP addresses of TPU workers."""
+    config, tpu_manager = _get_config_and_manager()
     try:
         internal_ips = await tpu_manager.get_internal_ips()
-        tpu_manager.display_ips(internal_ips, "internal", output_format=format)
+        tpu_manager.display_ips(internal_ips, "internal", output_format="comma")
     except Exception as e:
         console.print(f"[red]Failed to get internal IPs: {e!s}[/red]")
 
 
 @cli.command()
-@click.option(
-    "--format", type=click.Choice(["table", "comma"]), default="comma", help="Output format: 'table' or 'comma'"
-)
 @async_command
-async def get_external_ips(format):  # noqa
+async def get_external_ips():
     """Get external IP addresses of TPU workers."""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
-        return
-    tpu_manager = TPUManager(project_id, zone, tpu_name)
+
+    config, tpu_manager = _get_config_and_manager()
     try:
         external_ips = await tpu_manager.get_external_ips()
         console.print(external_ips)
@@ -144,7 +175,7 @@ async def get_external_ips(format):  # noqa
 @click.option("--delay", default=5, help="Delay between retries in seconds")
 @click.option("--timeout", default=-1, help="Command timeout in seconds")
 @click.option("--no-stream", is_flag=True, help="Disable output streaming")
-@click.option("--background", is_flag=True, help="Run command in background (nohup-like)")
+@click.option("--background", is_flag=True, help="Run command in background")
 @async_command
 async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
     """Run a command on TPU VM with advanced features"""
@@ -156,15 +187,8 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
     stream = not no_stream
     if timeout == -1:
         timeout = None
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
 
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
-
+    config, tpu_manager = _get_config_and_manager()
     start_time = datetime.now()
     console.print(f"[cyan]Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}[/cyan]")
     console.print(f"[cyan]Executing: {command}[/cyan]")
@@ -174,98 +198,42 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
         TextColumn("[progress.description]{task.description}"),
         disable=stream,
     ) as progress:
-        task = progress.add_task(description=f"Executing command: {command} (Attempt 1)", total=None)
+        task = progress.add_task(description=f"Executing command: {command}", total=None)
 
         for attempt in range(1, retry + 1):
             try:
-                if background:
-                    background_cmd = (
-                        f"nohup {command} > /tmp/nohup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.out 2>&1 & echo $!"
-                    )
-                    returncode, pid, stderr = await asyncio.wait_for(
-                        tpu.execute_command(
-                            background_cmd,
-                            worker,
-                            stream=False,
-                            background=True,
-                        ),
-                        timeout=timeout,
-                    )
-                    if returncode == 0:
-                        console.print(f"[green]Command started in background with PID: {pid}[/green]")
-                        console.print("[green]Output will be saved to /tmp/nohup_*.out[/green]")
-                        config.save_command_history(command, "background", f"PID: {pid}")
-                        console.print("\n[yellow]To check process status:[/yellow]")
-                        console.print(f"eopod check-background {pid}")
-                        break
+                returncode, stdout, stderr = await asyncio.wait_for(
+                    tpu_manager.execute_command(command, worker, stream=stream, background=background),
+                    timeout=timeout,
+                )
+
+                if returncode == 0:
+                    if not stream and not background:
+                        progress.update(task, description="[green]Command completed successfully![/green]")
+                        console.print("\nOutput:")
+                        console.print(stdout)
+
+                    end_time = datetime.now()
+                    duration = end_time - start_time
+                    console.print(f"[cyan]Duration: {duration}[/cyan]")
+
+                    config.save_command_history(command, "success", stdout if not stream else "Streamed output")
+                    break
                 else:
-                    returncode, stdout, stderr = await asyncio.wait_for(
-                        tpu.execute_command(
-                            command,
-                            worker,
-                            stream=stream,
-                            background=False,
-                        ),
-                        timeout=timeout,
-                    )
+                    progress.update(task, description=f"[red]Attempt {attempt} failed[/red]")
+                    console.print(f"[red]Error: {stderr}[/red]")
+                    config.save_error_log(command, stderr)
 
-                    if returncode == 0:
-                        if not stream:
-                            progress.update(
-                                task,
-                                description="[green]Command completed successfully![/green]",
-                            )
-                            console.print("\nOutput:")
-                            console.print(stdout)
-                        else:
-                            console.print("[green]Command completed successfully![/green]")
-                        end_time = datetime.now()
-                        duration = end_time - start_time
-                        console.print(f"[cyan]Completed at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}[/cyan]")
-                        console.print(f"[cyan]Duration: {duration}[/cyan]")
-
-                        config.save_command_history(
-                            command,
-                            "success",
-                            stdout if not stream else "Streamed output",
-                        )
-                        break
-                    else:
-                        progress.update(
-                            task,
-                            description=f"[red]Attempt {attempt} failed:[/red] {stderr[:100]}...",
-                        )
-                        console.print(f"[red]Attempt {attempt} failed:[/red] {stderr}")
-                        config.save_error_log(command, stderr)
-
-            except asyncio.TimeoutError:
-                progress.update(
-                    task,
-                    description=f"[red]Command timed out after {timeout} seconds (attempt {attempt})[/red]",
-                )
-                console.print(f"[red]Command timed out after {timeout} seconds (attempt {attempt})[/red]")
+            except TimeoutError:
+                console.print(f"[red]Command timed out after {timeout} seconds[/red]")
                 config.save_error_log(command, "Command timed out")
-
             except Exception as e:
-                progress.update(
-                    task,
-                    description=f"[red]Error (attempt {attempt}):[/red] {e!s}",
-                )
-                console.print(f"[red]Error (attempt {attempt}):[/red] {e!s}")
+                console.print(f"[red]Error: {e!s}[/red]")
                 config.save_error_log(command, str(e))
                 break
 
             if attempt < retry:
-                progress.update(
-                    task,
-                    description=f"Retrying command in {delay} seconds... (Attempt {attempt + 1}/{retry})",
-                )
                 await asyncio.sleep(delay)
-            else:
-                progress.update(
-                    task,
-                    description=f"[red]Command failed after {retry} attempts[/red]",
-                )
 
 
 @cli.command()
@@ -274,20 +242,14 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 @async_command
 async def check_background(pid_args, worker):
     """Check status of background processes"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
 
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
+    config, tpu = _get_config_and_manager()
 
     if pid_args:
         pids = " ".join(pid_args)
         command = f"ps -p {pids} -f"
     else:
-        command = "ps aux | grep nohup"
+        command = "ps aux | grep nohup | grep -v grep"
 
     returncode, stdout, stderr = await tpu.execute_command(command, worker)
 
@@ -302,16 +264,8 @@ async def check_background(pid_args, worker):
 @async_command
 async def setup_path():
     """Add ~/.local/bin to PATH on all TPU workers if not already present"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
+    config, tpu = _get_config_and_manager()
 
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
-
-    # Command to check if ~/.local/bin is in PATH and add it if not
     path_command = """
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
@@ -351,14 +305,7 @@ async def setup_path():
 async def kill(pid_args, worker, force):
     """Kill a background process"""
     pids = " ".join(pid_args)
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
+    config, tpu = _get_config_and_manager()
 
     signal = "-9" if force else "-15"
     command = f"kill {signal} {pids}"
@@ -375,15 +322,8 @@ async def kill(pid_args, worker, force):
 @async_command
 async def status():
     """Show TPU status and information"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
+    config, tpu = _get_config_and_manager()
     try:
-        tpu = TPUManager(project_id, zone, tpu_name)
         status = await tpu.get_status()
 
         table = Table(title="TPU Status")
@@ -403,44 +343,13 @@ async def status():
 
 
 @cli.command()
-def history():
-    """Show command execution history"""
-    config = EOConfig()
-
-    if not config.history_file.exists():
-        console.print("No command history found.")
-        return
-
-    with open(config.history_file, "r") as f:
-        history = yaml.safe_load(f) or []
-
-    table = Table(title="Command History")
-    table.add_column("Timestamp")
-    table.add_column("Command")
-    table.add_column("Status")
-    table.add_column("Output (truncated)")
-
-    for entry in history[-15:]:
-        table.add_row(entry["timestamp"], entry["command"], entry["status"], entry["output"])
-
-    console.print(table)
-
-
-@cli.command()
 @click.option("--worker", default="all", help='Specific worker or "all"')
 @click.option("--force", is_flag=True, help="Force kill all processes")
 @click.option("--pid", multiple=True, type=int, help="Specific PIDs to kill")
 @async_command
 async def kill_tpu(worker, force, pid):
     """Kill processes using TPU resources"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
+    config, tpu = _get_config_and_manager()
 
     with Progress(
         SpinnerColumn(),
@@ -548,29 +457,69 @@ async def kill_tpu(worker, force, pid):
             config.save_error_log("kill_tpu", str(e))
 
 
+async def _execute_terminal_command(project_id, zone, tpu_name, command, worker):
+    """Helper function to execute commands in terminal mode"""
+    try:
+        tpu = TPUManager(project_id, zone, tpu_name)
+
+        # Show a simple spinner while executing
+        with Progress(SpinnerColumn(), TextColumn("Executing..."), console=console) as progress:
+            task = progress.add_task("exec", total=None)
+            returncode, stdout, stderr = await tpu.execute_command(command, worker, stream=False)
+            progress.remove_task(task)
+
+        if returncode == 0:
+            if stdout.strip():
+                console.print(stdout)
+        else:
+            console.print(f"[red]Command failed (exit code {returncode})[/red]")
+            if stderr.strip():
+                console.print(f"[red]{stderr}[/red]")
+
+    except Exception as e:
+        console.print(f"[red]Error executing command: {e}[/red]")
+
+
+async def _show_status_async(project_id, zone, tpu_name):
+    """Helper function to show TPU status in terminal"""
+    try:
+        tpu = TPUManager(project_id, zone, tpu_name)
+        status = await tpu.get_status()
+
+        table = Table(title="TPU Status")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value", style="white")
+
+        table.add_row("Name", status.get("name", ""))
+        table.add_row("State", status.get("state", ""))
+        table.add_row("Type", status.get("acceleratorType", ""))
+        table.add_row("Network", status.get("network", ""))
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[red]Error fetching status: {e}[/red]")
+
+
 @cli.command()
-def errors():
-    """Show recent command execution errors."""
+def history():
+    """Show command execution history"""
     config = EOConfig()
 
-    if not config.error_log_file.exists():
-        console.print("No error log found.")
+    if not config.history_file.exists():
+        console.print("No command history found.")
         return
 
-    with open(config.error_log_file, "r") as f:
-        try:
-            error_log = yaml.safe_load(f) or []
-        except yaml.YAMLError as e:
-            console.print(f"[red]Error loading error log: {e}[/red]")
-            return
+    with open(config.history_file, "r") as f:
+        history = yaml.safe_load(f) or []
 
-    table = Table(title="Error Log", style="red")
+    table = Table(title="Command History")
     table.add_column("Timestamp")
     table.add_column("Command")
-    table.add_column("Error")
+    table.add_column("Status")
+    table.add_column("Output (truncated)")
 
-    for entry in error_log:
-        table.add_row(entry["timestamp"], entry["command"], entry["error"][:200])
+    for entry in history[-15:]:
+        table.add_row(entry["timestamp"], entry["command"], entry["status"], entry["output"])
 
     console.print(table)
 
@@ -595,7 +544,11 @@ def show_config():
         console.print("[red]No configuration found. Please run 'eopod configure' first.[/red]")
 
 
-async def _smi_status(install_tpuinfo):
+@cli.command()
+@click.option("--worker", default="all", help='Specific worker or "all"')
+@click.option("--shell", default="/bin/bash", help="Shell to use (default: /bin/bash)")
+def terminal(worker, shell):
+    """Open an interactive terminal session with TPU workers"""
     config = EOConfig()
     project_id, zone, tpu_name = config.get_credentials()
 
@@ -603,60 +556,173 @@ async def _smi_status(install_tpuinfo):
         console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
         return
 
-    tpu = TPUManager(project_id, zone, tpu_name)
-    if install_tpuinfo:
-        await tpu.execute_command("pip install tpu-info", stream=False)
-    _, text, __ = await tpu.execute_command(
-        'python -c "from tpu_info import cli;cli.print_chip_info()"',
-        stream=False,
+    # Show welcome message
+    welcome_panel = Panel.fit(
+        f"[bold green]TPU Interactive Terminal[/bold green]\n"
+        f"[cyan]TPU:[/cyan] {tpu_name}\n"
+        f"[cyan]Worker:[/cyan] {worker}\n"
+        f"[cyan]Zone:[/cyan] {zone}\n\n"
+        f"[yellow]Commands:[/yellow]\n"
+        f"  [bold]exit[/bold] or [bold]quit[/bold] - Exit terminal\n"
+        f"  [bold]:help[/bold] - Show help\n"
+        f"  [bold]:status[/bold] - Show TPU status\n"
+        f"  [bold]:worker <num>[/bold] - Switch to specific worker\n"
+        f"  [bold]:background <cmd>[/bold] - Run command in background\n",
+        title="Welcome",
+        border_style="blue",
     )
-    pattern = r"│\s+(\d+)\s+│\s+([\d.]+ GiB / [\d.]+ GiB)\s+│\s+([\d.]+%)\s+│"
-    matches = re.findall(pattern, text)
-    table_data = []
-    for match in matches:
-        device_index, memory_usage, duty_cycle = match
-        table_data.append([int(device_index), memory_usage, duty_cycle])
-    table_data_sorted = [[str(row[0]), row[1], row[2]] for row in sorted(table_data, key=lambda x: x[0])]
-    table = Table(
-        title="[bold magenta]TPU Utilization[/bold magenta]",
-        title_justify="left",
-    )
-    table.add_column("📟 Device Index", justify="center", style="bold blue")
-    table.add_column("💾 Memory Usage", justify="left", style="white")
-    table.add_column("⚡ Duty Cycle", justify="right", style="white")
+    console.print(welcome_panel)
 
-    for row in table_data_sorted:
-        table.add_row(str(row[0]), row[1], row[2])
+    current_worker = worker
+
+    while True:
+        try:
+            # Create a rich prompt
+            prompt_text = (
+                f"[bold green]eopod[/bold green]:[bold blue]{tpu_name}[/bold blue]:"
+                f"[bold yellow]worker-{current_worker}[/bold yellow]$ "
+            )
+            command = Prompt.ask(prompt_text, console=console)
+
+            if not command.strip():
+                continue
+
+            # Handle special commands
+            if command.lower() in ["exit", "quit"]:
+                console.print("[yellow]Goodbye![/yellow]")
+                break
+            elif command.startswith(":help"):
+                help_panel = Panel.fit(
+                    "[bold yellow]Available Commands:[/bold yellow]\n\n"
+                    "[bold]Regular commands[/bold] - Execute directly on TPU\n"
+                    "[bold]:help[/bold] - Show this help\n"
+                    "[bold]:status[/bold] - Show current TPU status\n"
+                    "[bold]:worker <num>[/bold] - Switch to specific worker (or 'all')\n"
+                    "[bold]:background <cmd>[/bold] - Run command in background\n"
+                    "[bold]:history[/bold] - Show recent command history\n"
+                    "[bold]:clear[/bold] - Clear screen\n"
+                    "[bold]exit/quit[/bold] - Exit terminal\n",
+                    title="Help",
+                    border_style="yellow",
+                )
+                console.print(help_panel)
+            elif command.startswith(":status"):
+                # Run async status command
+                asyncio.run(_show_status_async(project_id, zone, tpu_name))
+            elif command.startswith(":worker"):
+                parts = command.split()
+                if len(parts) == 2:
+                    new_worker = parts[1]
+                    current_worker = new_worker
+                    console.print(f"[green]Switched to worker: {current_worker}[/green]")
+                else:
+                    console.print("[red]Usage: :worker <worker_num|all>[/red]")
+            elif command.startswith(":background"):
+                bg_command = command[11:].strip()  # Remove ':background '
+                if bg_command:
+                    console.print(f"[yellow]Running in background: {bg_command}[/yellow]")
+                    asyncio.run(_execute_background_command(project_id, zone, tpu_name, bg_command, current_worker))
+                else:
+                    console.print("[red]Usage: :background <command>[/red]")
+            elif command.startswith(":history"):
+                _show_history()
+            elif command.startswith(":clear"):
+                console.clear()
+            else:
+                # Execute regular command on TPU
+                console.print(f"[cyan]Executing on worker {current_worker}: {command}[/cyan]")
+                asyncio.run(_execute_terminal_command(project_id, zone, tpu_name, command, current_worker))
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Use 'exit' or 'quit' to leave the terminal[/yellow]")
+        except EOFError:
+            console.print("\n[yellow]Goodbye![/yellow]")
+            break
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/red]")
+
+
+async def _execute_background_command(project_id, zone, tpu_name, command, worker):
+    """Helper function to execute background commands"""
+    try:
+        tpu = TPUManager(project_id, zone, tpu_name)
+        returncode, pid, stderr = await tpu.execute_command(command, worker, background=True)
+
+        if returncode == 0:
+            console.print(f"[green]Background process started with PID: {pid}[/green]")
+        else:
+            console.print(f"[red]Failed to start background process: {stderr}[/red]")
+
+    except Exception as e:
+        console.print(f"[red]Error starting background process: {e}[/red]")
+
+
+def _show_history():
+    """Helper function to show command history in terminal"""
+    config = EOConfig()
+
+    if not config.history_file.exists():
+        console.print("[yellow]No command history found.[/yellow]")
+        return
+
+    with open(config.history_file, "r") as f:
+        history = yaml.safe_load(f) or []
+
+    if not history:
+        console.print("[yellow]No command history found.[/yellow]")
+        return
+
+    table = Table(title="Recent Command History")
+    table.add_column("Time", style="cyan")
+    table.add_column("Command", style="white")
+    table.add_column("Status", style="green")
+
+    # Show last 10 commands
+    for entry in history[-10:]:
+        timestamp = entry["timestamp"].split("T")[1][:8]  # Show only time part
+        table.add_row(timestamp, entry["command"][:50], entry["status"])
 
     console.print(table)
 
 
 @cli.command()
-@click.option("--install-tpuinfo", is_flag=True, help="installs tpu-info (for first time only).")
 @async_command
-async def show_tpu_usage(install_tpuinfo):
-    await _smi_status(install_tpuinfo)
+async def smi():
+    """Show TPU utilization (like nvidia-smi)"""
+    config, tpu = _get_config_and_manager()
 
+    try:
+        _, text, _ = await tpu.execute_command(
+            f'{PYTHON_PATH} -c "from tpu_info import cli; cli.print_chip_info()"',
+            stream=False,
+        )
 
-@cli.command()
-@click.option("--install-tpuinfo", is_flag=True, help="installs tpu-info (for first time only).")
-@async_command
-async def smi(install_tpuinfo):
-    await _smi_status(install_tpuinfo)
+        pattern = r"│\s+(\d+)\s+│\s+([\d.]+ GiB / [\d.]+ GiB)\s+│\s+([\d.]+%)\s+│"
+        matches = re.findall(pattern, text)
+
+        if matches:
+            table = Table(title="[bold magenta]TPU Utilization[/bold magenta]")
+            table.add_column("📟 Device", justify="center", style="bold blue")
+            table.add_column("💾 Memory Usage", justify="left", style="white")
+            table.add_column("⚡ Duty Cycle", justify="right", style="white")
+
+            for device_index, memory_usage, duty_cycle in matches:
+                table.add_row(device_index, memory_usage, duty_cycle)
+
+            console.print(table)
+        else:
+            console.print("[yellow]Could not parse TPU utilization data[/yellow]")
+            console.print(text)  # Show raw output
+
+    except Exception as e:
+        console.print(f"[red]Error getting TPU utilization: {e}[/red]")
 
 
 @cli.command()
 @async_command
 async def clean_logs():
     """Clean up logs and temporary files on the TPU VM"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
-        return
-
-    tpu = TPUManager(project_id, zone, tpu_name)
+    config, tpu = _get_config_and_manager()
     command = """
     sudo bash -c 'echo "[*] Vacuuming journal logs (keeping 1 second)..." && journalctl --vacuum-time=1s && echo "[*] Deleting rotated/compressed logs..." && find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" -o -name "*.bak" -o -name "*-????????" -o -name "*.log.[0-9]*" \) -print -delete && echo "[*] Truncating active log files..." && find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; && echo "[*] Vacuuming journal logs to 50MB cap..." && journalctl --vacuum-size=5M && docker system prune -af --volumes && echo "[✔] Cleanup complete."'
     """  # noqa
@@ -735,14 +801,20 @@ def auto_config_ray(
         try:
             if not spot_tpu_project_id:
                 result = subprocess.run(
-                    ["gcloud", "config", "get-value", "project"], capture_output=True, text=True, check=True
+                    ["gcloud", "config", "get-value", "project"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 spot_tpu_project_id = result.stdout.strip()
                 console.print(f"[green]Using current project for spot TPU: {spot_tpu_project_id}[/green]")
 
             if not spot_tpu_zone:
                 result = subprocess.run(
-                    ["gcloud", "config", "get-value", "compute/zone"], capture_output=True, text=True, check=True
+                    ["gcloud", "config", "get-value", "compute/zone"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 spot_tpu_zone = result.stdout.strip()
                 console.print(f"[green]Using current zone for spot TPU: {spot_tpu_zone}[/green]")
@@ -801,7 +873,7 @@ def auto_config_ray(
                 console.print("[yellow]Head machine has no TPU (CPU-only head)[/yellow]")
 
             cmd = [
-                python_path or "python",
+                python_path or PYTHON_PATH,
                 "-m",
                 "eformer.executor.tpu_patch_ray",
                 "--self-job",
@@ -817,7 +889,7 @@ def auto_config_ray(
         console.print(f"[cyan]Configuring {len(spot_internal_ips)} spot TPU workers...[/cyan]")
 
         cmd_parts = [
-            python_path or "python",
+            python_path or PYTHON_PATH,
             "-m",
             "eformer.executor.tpu_patch_ray",
             "--tpu-version",
@@ -873,7 +945,7 @@ def auto_config_ray(
             cmd_parts = [
                 EOPOD_PATH,
                 "run",
-                python_path or "python",
+                python_path or PYTHON_PATH,
                 "-m",
                 "eformer.executor.tpu_patch_ray",
                 "--head-only",
@@ -973,7 +1045,7 @@ def auto_config_ray(
         cmd_parts = [
             EOPOD_PATH,
             "run",
-            python_path or "python",
+            python_path or PYTHON_PATH,
             "-m",
             "eformer.executor.tpu_patch_ray",
         ]
@@ -1204,6 +1276,37 @@ async def open_port(
                 )
             except Exception as e:
                 console.print(f"[red]Failed to {'update' if rule_exists else 'create'} firewall rule: {e}[/red]")
+
+
+@cli.command()
+def errors():
+    """Show recent command execution errors"""
+    config = EOConfig()
+
+    if not config.error_log_file.exists():
+        console.print("[yellow]No error log found.[/yellow]")
+        return
+
+    with open(config.error_log_file, "r") as f:
+        try:
+            error_log = yaml.safe_load(f) or []
+        except yaml.YAMLError as e:
+            console.print(f"[red]Error loading error log: {e}[/red]")
+            return
+
+    if not error_log:
+        console.print("[green]No errors found![/green]")
+        return
+
+    table = Table(title="Error Log", style="red")
+    table.add_column("Timestamp")
+    table.add_column("Command")
+    table.add_column("Error")
+
+    for entry in error_log[-10:]:  # Show last 10 errors
+        table.add_row(entry["timestamp"], entry["command"][:30], entry["error"][:100])
+
+    console.print(table)
 
 
 def main():

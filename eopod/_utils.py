@@ -34,16 +34,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.theme import Theme
 
-console = Console(theme=Theme({"info": "cyan", "warning": "yellow", "error": "white", "success": "green"}))
+console = Console(theme=Theme({"info": "cyan", "warning": "yellow", "error": "red", "success": "green"}))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
     handlers=[RichHandler(console=console, rich_tracebacks=True)],
 )
-
-
-HOME = str(pathlib.Path.home())
 
 
 def find_eopod_in_current_env() -> pathlib.Path:
@@ -65,11 +62,12 @@ def find_eopod_in_current_env() -> pathlib.Path:
 
 
 EOPOD_PATH = str(find_eopod_in_current_env())
+PYTHON_PATH = str(sys.executable)
 
 
 def list2cmdline(seq):
+    """Convert a sequence to a command line string (Windows compatible)."""
     result = []
-    needquote = False
     for arg in map(os.fsdecode, seq):
         bs_buf = []
         if result:
@@ -97,18 +95,6 @@ def list2cmdline(seq):
     return "".join(result)
 
 
-def clean_tqdm_output(line: str) -> str:
-    """Clean up TQDM progress bar output to show only the latest state."""
-    if "\r" in line:
-        return line.rstrip().split("\r")[-1]
-    return line.rstrip()
-
-
-def is_tqdm_line(line: str) -> bool:
-    """Check if a line contains TQDM progress bar."""
-    return "%|" in line and "it/s]" in line
-
-
 class TPUManager:
     def __init__(self, project_id: str, zone: str, tpu_name: str):
         self.project_id = project_id
@@ -116,6 +102,7 @@ class TPUManager:
         self.tpu_name = tpu_name
 
     async def get_status(self) -> dict:
+        """Get TPU status information."""
         cmd = [
             "gcloud",
             "compute",
@@ -129,9 +116,7 @@ class TPUManager:
 
         console.print("[yellow]Fetching TPU status...[/yellow]")
         process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         stdout, stderr = await process.communicate()
@@ -145,12 +130,9 @@ class TPUManager:
             raise RuntimeError(f"Failed to get TPU status: {error_message}")
 
     async def execute_command(
-        self,
-        command: str,
-        worker: str = "all",
-        stream: bool = False,
-        background: bool = False,
+        self, command: str, worker: str = "all", stream: bool = False, background: bool = False
     ) -> tuple:
+        """Execute a command on TPU VM workers."""
         if background:
             command = f"nohup {command} > /tmp/nohup.out 2>&1 & echo $!"
 
@@ -168,6 +150,7 @@ class TPUManager:
         ]
 
         console.print(f"Executing command on worker {worker}: [info]{command}[/]")
+
         if stream:
             with Progress(
                 SpinnerColumn(),
@@ -180,13 +163,10 @@ class TPUManager:
                     progress.print("[blue]Command completed successfully[/]")
                 else:
                     progress.print("[red]Command failed[/]")
-
                 return exit_code, "", ""
         else:
             process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
 
@@ -216,9 +196,7 @@ class TPUManager:
         ]
 
         process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         stdout, stderr = await process.communicate()
@@ -252,7 +230,7 @@ class TPUManager:
             console.print(f"[red]Error fetching internal IPs: {e!s}[/red]")
             raise
 
-    async def get_external_ips(self) -> dict:
+    async def get_external_ips(self) -> str:
         """Get external IP addresses of TPU workers."""
         try:
             cmd = [
@@ -295,19 +273,9 @@ class TPUManager:
             console.print(table)
 
 
-class AsyncContext:
-    def __init__(self, delay):
-        self.delay = delay
-
-    async def __aenter__(self):
-        await asyncio.sleep(self.delay)
-        return self.delay
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await asyncio.sleep(self.delay)
-
-
 def async_command(fn):
+    """Decorator to run async functions in CLI commands."""
+
     @wraps(fn)
     def wrapper(*args, **kwargs):
         return asyncio.run(fn(*args, **kwargs))
@@ -337,6 +305,8 @@ async def run_command(command, capture_output=False):
 
 
 class EOConfig:
+    """Configuration manager for eopod."""
+
     def __init__(self):
         self.config_dir = Path.home() / ".eopod"
         self.config_file = self.config_dir / "config.ini"
@@ -348,6 +318,7 @@ class EOConfig:
         self.setup_logging()
 
     def setup_logging(self):
+        """Setup logging configuration."""
         logging.basicConfig(
             level=logging.INFO,
             format="%(message)s",
@@ -358,19 +329,23 @@ class EOConfig:
         )
 
     def ensure_config_dir(self):
+        """Create configuration directory if it doesn't exist."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
     def load_config(self):
+        """Load configuration from file."""
         config = configparser.ConfigParser()
         if self.config_file.exists():
             config.read(self.config_file)
         return config
 
     def save_config(self):
+        """Save configuration to file."""
         with open(self.config_file, "w") as f:
             self.config.write(f)
 
     def get_credentials(self):
+        """Get stored GCP credentials."""
         if "DEFAULT" not in self.config:
             return None, None, None
         return (
@@ -380,22 +355,28 @@ class EOConfig:
         )
 
     def save_command_history(self, command: str, status: str, output: str):
+        """Save command to history."""
         history = []
         if self.history_file.exists():
             with open(self.history_file, "r") as f:
                 history = yaml.safe_load(f) or []
 
         history.append(
-            {"timestamp": datetime.now().isoformat(), "command": command, "status": status, "output": output[:500]}
+            {
+                "timestamp": datetime.now().isoformat(),
+                "command": command,
+                "status": status,
+                "output": output[:500],  # Truncate long outputs
+            }
         )
 
-        history = history[-100:]
+        history = history[-100:]  # Keep only last 100 entries
 
         with open(self.history_file, "w") as f:
             yaml.dump(history, f)
 
     def save_error_log(self, command: str, error: str):
-        """Saves error details to a separate error log."""
+        """Save error details to error log."""
         error_log = []
         if self.error_log_file.exists():
             with open(self.error_log_file, "r") as f:
@@ -407,7 +388,7 @@ class EOConfig:
 
         error_log.append({"timestamp": datetime.now().isoformat(), "command": command, "error": error})
 
-        error_log = error_log[-50:]
+        error_log = error_log[-50:]  # Keep only last 50 errors
 
         with open(self.error_log_file, "w") as f:
             yaml.dump(error_log, f)
