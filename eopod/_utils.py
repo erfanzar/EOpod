@@ -188,6 +188,7 @@ class TPUManager:
             "gcloud",
             "compute",
             "tpus",
+            "tpu-vm",
             "describe",
             self.tpu_name,
             f"--zone={self.zone}",

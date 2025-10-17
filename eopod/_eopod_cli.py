@@ -147,7 +147,7 @@ async def install_package_uv(packages, uv_location):
 @async_command
 async def get_internal_ips():
     """Get internal IP addresses of TPU workers."""
-    config, tpu_manager = _get_config_and_manager()
+    _config, tpu_manager = _get_config_and_manager()
     try:
         internal_ips = await tpu_manager.get_internal_ips()
         tpu_manager.display_ips(internal_ips, "internal", output_format="comma")
@@ -160,7 +160,7 @@ async def get_internal_ips():
 async def get_external_ips():
     """Get external IP addresses of TPU workers."""
 
-    config, tpu_manager = _get_config_and_manager()
+    _config, tpu_manager = _get_config_and_manager()
     try:
         external_ips = await tpu_manager.get_external_ips()
         console.print(external_ips)
@@ -243,7 +243,7 @@ async def run(cmd_args, worker, retry, delay, timeout, no_stream, background):
 async def check_background(pid_args, worker):
     """Check status of background processes"""
 
-    config, tpu = _get_config_and_manager()
+    _config, tpu = _get_config_and_manager()
 
     if pid_args:
         pids = " ".join(pid_args)
@@ -305,12 +305,12 @@ async def setup_path():
 async def kill(pid_args, worker, force):
     """Kill a background process"""
     pids = " ".join(pid_args)
-    config, tpu = _get_config_and_manager()
+    _config, tpu = _get_config_and_manager()
 
     signal = "-9" if force else "-15"
     command = f"kill {signal} {pids}"
 
-    returncode, stdout, stderr = await tpu.execute_command(command, worker)
+    returncode, _stdout, stderr = await tpu.execute_command(command, worker)
 
     if returncode == 0:
         console.print(f"[green]Successfully {'force ' if force else ''}killed process(es) {pids}[/green]")
@@ -322,7 +322,7 @@ async def kill(pid_args, worker, force):
 @async_command
 async def status():
     """Show TPU status and information"""
-    config, tpu = _get_config_and_manager()
+    _config, tpu = _get_config_and_manager()
     try:
         status = await tpu.get_status()
 
@@ -377,7 +377,7 @@ async def kill_tpu(worker, force, pid):
             )
 
             async def scan_worker(w):
-                returncode, stdout, stderr = await tpu.execute_command(
+                returncode, stdout, _stderr = await tpu.execute_command(
                     check_process_cmd,
                     worker=str(w),
                     stream=False,
@@ -416,7 +416,7 @@ async def kill_tpu(worker, force, pid):
                 results = []
                 for pid in pids:
                     kill_cmd = f"kill {'-9' if force else ''} {pid}"
-                    returncode, stdout, stderr = await tpu.execute_command(kill_cmd, worker=str(w), stream=False)
+                    returncode, _stdout, stderr = await tpu.execute_command(kill_cmd, worker=str(w), stream=False)
                     results.append((pid, returncode == 0, stderr))
                 return w, results
 
@@ -438,7 +438,7 @@ async def kill_tpu(worker, force, pid):
             async def cleanup_worker(w):
                 results = []
                 for cmd in cleanup_commands:
-                    returncode, stdout, stderr = await tpu.execute_command(cmd, worker=str(w), stream=False)
+                    returncode, _stdout, stderr = await tpu.execute_command(cmd, worker=str(w), stream=False)
                     results.append((cmd, returncode == 0, stderr))
                 return w, results
 
@@ -689,7 +689,7 @@ def _show_history():
 @async_command
 async def smi():
     """Show TPU utilization (like nvidia-smi)"""
-    config, tpu = _get_config_and_manager()
+    _config, tpu = _get_config_and_manager()
 
     try:
         _, text, _ = await tpu.execute_command(
@@ -722,7 +722,7 @@ async def smi():
 @async_command
 async def clean_logs():
     """Clean up logs and temporary files on the TPU VM"""
-    config, tpu = _get_config_and_manager()
+    _config, tpu = _get_config_and_manager()
     command = """
     sudo bash -c 'echo "[*] Vacuuming journal logs (keeping 1 second)..." && journalctl --vacuum-time=1s && echo "[*] Deleting rotated/compressed logs..." && find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" -o -name "*.bak" -o -name "*-????????" -o -name "*.log.[0-9]*" \) -print -delete && echo "[*] Truncating active log files..." && find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; && echo "[*] Vacuuming journal logs to 50MB cap..." && journalctl --vacuum-size=5M && docker system prune -af --volumes && echo "[✔] Cleanup complete."'
     """  # noqa
