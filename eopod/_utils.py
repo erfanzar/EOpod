@@ -107,6 +107,7 @@ class TPUManager:
             "gcloud",
             "compute",
             "tpus",
+            "tpu-vm",
             "describe",
             self.tpu_name,
             f"--zone={self.zone}",
@@ -208,6 +209,10 @@ class TPUManager:
             console.print(f"[red]Failed to fetch TPU details[/]: {error_message}")
             raise RuntimeError(f"Failed to fetch TPU details: {error_message}")
 
+    async def get_tpu_info(self) -> dict:
+        """Backward-compatible alias used by older call sites."""
+        return await self.get_tpu_details()
+
     async def get_internal_ips(self) -> dict:
         """Get internal IP addresses of TPU workers."""
         try:
@@ -243,10 +248,11 @@ class TPUManager:
                 self.tpu_name,
                 f"--zone={self.zone}",
                 f"--project={self.project_id}",
-                '--format="value(networkEndpoints[].accessConfig.externalIp)"',
+                "--format=value(networkEndpoints[].accessConfig.externalIp)",
             ]
-            string_command = " ".join(cmd)
-            process = subprocess.run(string_command, shell=True, capture_output=True, text=True)
+            process = subprocess.run(cmd, capture_output=True, text=True)
+            if process.returncode != 0:
+                raise RuntimeError(process.stderr.strip() or "Failed to fetch external IPs")
             return process.stdout.replace(";", ",").strip()
         except Exception as e:
             console.print(f"[red]Error fetching external IPs: {e!s}[/red]")
@@ -354,6 +360,22 @@ class EOConfig:
             self.config["DEFAULT"].get("zone"),
             self.config["DEFAULT"].get("tpu_name"),
         )
+
+    def get_queued_resource(self):
+        """Get stored queued resource name (if available)."""
+        if "DEFAULT" not in self.config:
+            return None
+        return self.config["DEFAULT"].get("queued_resource")
+
+    def set_credentials(self, project_id: str, zone: str, tpu_name: str, queued_resource: str | None = None):
+        """Persist GCP credentials and optional queued resource."""
+        if "DEFAULT" not in self.config:
+            self.config["DEFAULT"] = {}
+        self.config["DEFAULT"]["project_id"] = project_id
+        self.config["DEFAULT"]["zone"] = zone
+        self.config["DEFAULT"]["tpu_name"] = tpu_name
+        if queued_resource:
+            self.config["DEFAULT"]["queued_resource"] = queued_resource
 
     def save_command_history(self, command: str, status: str, output: str):
         """Save command to history."""

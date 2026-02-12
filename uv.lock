@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11, <3.14"
 
 [[package]]
@@ -25,7 +25,7 @@ wheels = [
 
 [[package]]
 name = "eopod"
-version = "0.0.32"
+version = "0.0.35"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -39,7 +39,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0.1" },
     { name = "rich", specifier = ">=13.7.0" },
-    { name = "tpu-info", specifier = "==0.4.0" },
+    { name = "tpu-info" },
 ]
 
 [[package]]

@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import asyncio
+import json
 import logging
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -46,13 +48,250 @@ def cli():
     pass
 
 
-def _get_config_and_manager():
+def _read_gcloud_config_property(property_name: str) -> str:
+    """Read gcloud config property and fail clearly when unset."""
+    result = subprocess.run(
+        ["gcloud", "config", "get", property_name],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    value = result.stdout.strip()
+    if not value or value == "(unset)":
+        raise ValueError(f"gcloud config property '{property_name}' is unset")
+    return value
+
+
+def _network_name(network_value: str | None) -> str:
+    """Normalize full network URI to simple network name."""
+    if not network_value:
+        return "default"
+    return network_value.rsplit("/", 1)[-1]
+
+
+def _basename(resource_name: str | None) -> str | None:
+    if not resource_name:
+        return None
+    return resource_name.rsplit("/", 1)[-1]
+
+
+def _metadata_value(path: str) -> str | None:
+    url = f"http://metadata.google.internal/computeMetadata/v1/{path}"
+    result = subprocess.run(
+        ["curl", "-fsS", "-H", "Metadata-Flavor: Google", url],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _detect_project_id_from_metadata() -> str | None:
+    return _metadata_value("project/project-id")
+
+
+def _detect_zone_from_metadata() -> str | None:
+    zone_output = _metadata_value("instance/zone")
+    if not zone_output:
+        return None
+    zone_match = re.search(r"/zones/([^/]+)", zone_output)
+    if zone_match:
+        return zone_match.group(1)
+    return None
+
+
+def _detect_self_internal_ip_from_metadata() -> str | None:
+    return _metadata_value("instance/network-interfaces/0/ip")
+
+
+def _list_tpu_vms(project_id: str, zone: str) -> list[dict]:
+    cmd = [
+        "gcloud",
+        "compute",
+        "tpus",
+        "tpu-vm",
+        "list",
+        f"--project={project_id}",
+        f"--zone={zone}",
+        "--format=json(name,queuedResource,state,networkEndpoints.ipAddress)",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Failed to list TPU VMs")
+    try:
+        data = json.loads(result.stdout.strip() or "[]")
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse TPU VM list output: {e}") from e
+    return data if isinstance(data, list) else []
+
+
+def _detect_tpu_identity_from_current_vm(project_id: str, zone: str) -> tuple[str | None, str | None]:
+    self_ip = _detect_self_internal_ip_from_metadata()
+    if not self_ip:
+        return None, None
+
+    # Preferred path: let gcloud do endpoint flatten/filter directly.
+    try:
+        cmd = [
+            "gcloud",
+            "compute",
+            "tpus",
+            "tpu-vm",
+            "list",
+            f"--project={project_id}",
+            f"--zone={zone}",
+            "--flatten=networkEndpoints[]",
+            f"--filter=networkEndpoints.ipAddress={self_ip}",
+            "--format=value(name.basename(),queuedResource.basename())",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            line = next((ln.strip() for ln in result.stdout.splitlines() if ln.strip()), "")
+            if line:
+                parts = line.split()
+                detected_tpu = parts[0] if len(parts) >= 1 else None
+                detected_queued = parts[1] if len(parts) >= 2 else None
+                return detected_tpu, detected_queued
+    except Exception:
+        pass
+
+    # Fallback path: parse structured JSON from list output.
+    try:
+        for node in _list_tpu_vms(project_id, zone):
+            endpoints = node.get("networkEndpoints", []) or []
+            endpoint_ips = [ep.get("ipAddress") for ep in endpoints if ep.get("ipAddress")]
+            if self_ip in endpoint_ips:
+                return _basename(node.get("name")), _basename(node.get("queuedResource"))
+    except Exception:
+        return None, None
+    return None, None
+
+
+def _resolve_tpu_from_queued_resource(project_id: str, zone: str, queued_resource: str) -> str | None:
+    queued_resource = _basename(queued_resource) or queued_resource
+    try:
+        matches = []
+        for node in _list_tpu_vms(project_id, zone):
+            queued_basename = _basename(node.get("queuedResource"))
+            if queued_basename == queued_resource:
+                matches.append(node)
+
+        if not matches:
+            return None
+
+        active = next((m for m in matches if str(m.get("state", "")).upper() in {"READY", "ACTIVE"}), None)
+        selected = active or matches[0]
+        return _basename(selected.get("name"))
+    except Exception:
+        return None
+
+
+def _describe_tpu_vm(project_id: str, zone: str, tpu_name: str) -> dict | None:
+    cmd = [
+        "gcloud",
+        "compute",
+        "tpus",
+        "tpu-vm",
+        "describe",
+        tpu_name,
+        f"--project={project_id}",
+        f"--zone={zone}",
+        "--format=json",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+
+
+def _resolve_runtime_credentials(require_tpu: bool, verbose: bool = False):
     config = EOConfig()
     project_id, zone, tpu_name = config.get_credentials()
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure the tool first using 'eopod configure'[/red]")
-        return
+    queued_resource = config.get_queued_resource()
+    original = (project_id, zone, tpu_name, queued_resource)
 
+    if not project_id:
+        project_id = _detect_project_id_from_metadata()
+        if project_id and verbose:
+            console.print(f"[yellow]Auto-detected project ID from metadata: {project_id}[/yellow]")
+    if not zone:
+        zone = _detect_zone_from_metadata()
+        if zone and verbose:
+            console.print(f"[yellow]Auto-detected zone from metadata: {zone}[/yellow]")
+
+    if not project_id:
+        try:
+            project_id = _read_gcloud_config_property("project")
+            if verbose:
+                console.print(f"[yellow]Using gcloud config project: {project_id}[/yellow]")
+        except Exception:
+            pass
+    if not zone:
+        try:
+            zone = _read_gcloud_config_property("compute/zone")
+            if verbose:
+                console.print(f"[yellow]Using gcloud config zone: {zone}[/yellow]")
+        except Exception:
+            pass
+
+    if project_id and zone:
+        if not tpu_name:
+            detected_tpu, detected_queued = _detect_tpu_identity_from_current_vm(project_id, zone)
+            if detected_tpu:
+                tpu_name = detected_tpu
+                queued_resource = queued_resource or detected_queued
+                if verbose:
+                    console.print(f"[yellow]Auto-detected TPU name: {tpu_name}[/yellow]")
+            elif queued_resource:
+                resolved_tpu = _resolve_tpu_from_queued_resource(project_id, zone, queued_resource)
+                if resolved_tpu:
+                    tpu_name = resolved_tpu
+                    if verbose:
+                        console.print(f"[yellow]Resolved TPU name from queued resource: {tpu_name}[/yellow]")
+        else:
+            tpu_info = _describe_tpu_vm(project_id, zone, tpu_name)
+            if tpu_info:
+                current_queued = _basename(tpu_info.get("queuedResource"))
+                if current_queued:
+                    queued_resource = current_queued
+            else:
+                resolved_tpu = None
+                if queued_resource:
+                    resolved_tpu = _resolve_tpu_from_queued_resource(project_id, zone, queued_resource)
+                if not resolved_tpu:
+                    detected_tpu, detected_queued = _detect_tpu_identity_from_current_vm(project_id, zone)
+                    resolved_tpu = detected_tpu
+                    queued_resource = queued_resource or detected_queued
+                if resolved_tpu:
+                    if verbose:
+                        console.print(
+                            f"[yellow]Configured TPU '{tpu_name}' is stale; using '{resolved_tpu}' instead.[/yellow]"
+                        )
+                    tpu_name = resolved_tpu
+
+    has_required = all([project_id, zone, tpu_name]) if require_tpu else all([project_id, zone])
+    if not has_required:
+        return None
+
+    if (project_id, zone, tpu_name, queued_resource) != original and project_id and zone and tpu_name:
+        config.set_credentials(project_id, zone, tpu_name, queued_resource=queued_resource)
+        config.save_config()
+
+    return config, project_id, zone, tpu_name, queued_resource
+
+
+def _get_config_and_manager():
+    resolved = _resolve_runtime_credentials(require_tpu=True, verbose=True)
+    if not resolved:
+        raise click.ClickException(
+            "Could not resolve project/zone/tpu automatically. Run 'eopod configure' or pass values explicitly."
+        )
+    config, project_id, zone, tpu_name, _queued_resource = resolved
     tpu_manager = TPUManager(project_id, zone, tpu_name)
     return config, tpu_manager
 
@@ -60,51 +299,92 @@ def _get_config_and_manager():
 @cli.command()
 @click.option("--project-id", help="Google Cloud Project ID (optional if running on GCP)")
 @click.option("--zone", help="Google Cloud Zone (optional if running on GCP)")
-@click.option("--tpu-name", required=True, help="TPU Name")
+@click.option("--tpu-name", required=False, help="TPU Name (auto-detected on TPU VM if omitted)")
 def configure(project_id, zone, tpu_name):
     """Configure eopod with your Google Cloud details"""
-    import re
-
     config = EOConfig()
-    if "DEFAULT" not in config.config:
-        config.config["DEFAULT"] = {}
+    stored_project_id, stored_zone, stored_tpu_name = config.get_credentials()
+    queued_resource = config.get_queued_resource()
 
     if not project_id:
-        try:
-            project_id = subprocess.check_output(
-                "curl -s 'http://metadata.google.internal/computeMetadata/v1/project/project-id' -H 'Metadata-Flavor: Google'",  # noqa
-                shell=True,
-                text=True,
-            ).strip()
+        project_id = _detect_project_id_from_metadata()
+        if project_id:
             console.print(f"[yellow]Auto-detected project ID: {project_id}[/yellow]")
-        except subprocess.CalledProcessError:
-            console.print("[red]Failed to auto-detect project ID. Please provide it manually.[/red]")
-            return
+    if not project_id:
+        try:
+            project_id = _read_gcloud_config_property("project")
+            console.print(f"[yellow]Using gcloud config project: {project_id}[/yellow]")
+        except Exception:
+            pass
+
+    if not project_id and stored_project_id:
+        project_id = stored_project_id
+        console.print(f"[yellow]Using saved project ID: {project_id}[/yellow]")
+
+    if not project_id:
+        console.print("[red]Failed to auto-detect project ID. Please provide it manually.[/red]")
+        return
 
     if not zone:
+        zone = _detect_zone_from_metadata()
+        if zone:
+            console.print(f"[yellow]Auto-detected zone: {zone}[/yellow]")
+    if not zone:
         try:
-            zone_output = subprocess.check_output(
-                "curl -s 'http://metadata.google.internal/computeMetadata/v1/instance/zone' -H 'Metadata-Flavor: Google'",  # noqa
-                shell=True,
-                text=True,
-            ).strip()
+            zone = _read_gcloud_config_property("compute/zone")
+            console.print(f"[yellow]Using gcloud config zone: {zone}[/yellow]")
+        except Exception:
+            pass
 
-            zone_match = re.search(r"/zones/([^/]+)", zone_output)
-            if zone_match:
-                zone = zone_match.group(1)
-                console.print(f"[yellow]Auto-detected zone: {zone}[/yellow]")
-            else:
-                console.print("[red]Failed to parse auto-detected zone. Please provide it manually.[/red]")
-                return
-        except subprocess.CalledProcessError:
-            console.print("[red]Failed to auto-detect zone. Please provide it manually.[/red]")
-            return
+    if not zone and stored_zone:
+        zone = stored_zone
+        console.print(f"[yellow]Using saved zone: {zone}[/yellow]")
 
-    config.config["DEFAULT"]["project_id"] = project_id
-    config.config["DEFAULT"]["zone"] = zone
-    config.config["DEFAULT"]["tpu_name"] = tpu_name
+    if not zone:
+        console.print("[red]Failed to auto-detect zone. Please provide it manually.[/red]")
+        return
+
+    if not tpu_name:
+        detected_tpu, detected_queued = _detect_tpu_identity_from_current_vm(project_id, zone)
+        if detected_tpu:
+            tpu_name = detected_tpu
+            queued_resource = detected_queued or queued_resource
+            console.print(f"[yellow]Auto-detected TPU name: {tpu_name}[/yellow]")
+        elif queued_resource:
+            resolved_tpu = _resolve_tpu_from_queued_resource(project_id, zone, queued_resource)
+            if resolved_tpu:
+                tpu_name = resolved_tpu
+                console.print(f"[yellow]Resolved TPU name from queued resource: {tpu_name}[/yellow]")
+        elif stored_tpu_name:
+            tpu_name = stored_tpu_name
+            console.print(f"[yellow]Using saved TPU name: {tpu_name}[/yellow]")
+
+    if not tpu_name:
+        console.print("[red]Failed to auto-detect TPU name. Please provide --tpu-name manually.[/red]")
+        return
+
+    tpu_info = _describe_tpu_vm(project_id, zone, tpu_name)
+    if not tpu_info and queued_resource:
+        resolved_tpu = _resolve_tpu_from_queued_resource(project_id, zone, queued_resource)
+        if resolved_tpu and resolved_tpu != tpu_name:
+            console.print(f"[yellow]Saved TPU name '{tpu_name}' is stale; using '{resolved_tpu}'.[/yellow]")
+            tpu_name = resolved_tpu
+            tpu_info = _describe_tpu_vm(project_id, zone, tpu_name)
+
+    if tpu_info:
+        current_queued = _basename(tpu_info.get("queuedResource"))
+        if current_queued:
+            queued_resource = current_queued
+    else:
+        console.print(
+            f"[yellow]Could not verify TPU '{tpu_name}' in {zone}. Saving configuration as provided.[/yellow]"
+        )
+
+    config.set_credentials(project_id, zone, tpu_name, queued_resource=queued_resource)
     config.save_config()
     console.print("[green]Configuration saved successfully![/green]")
+    if queued_resource:
+        console.print(f"[green]Queued resource: {queued_resource}[/green]")
 
 
 async def _install_package_uv(packages, uv_location):
@@ -325,6 +605,7 @@ async def status():
     _config, tpu = _get_config_and_manager()
     try:
         status = await tpu.get_status()
+        network = _network_name(status.get("networkConfig", {}).get("network") or status.get("network"))
 
         table = Table(title="TPU Status")
         table.add_column("Property")
@@ -333,7 +614,7 @@ async def status():
         table.add_row("Name", status.get("name", ""))
         table.add_row("State", status.get("state", ""))
         table.add_row("Type", status.get("acceleratorType", ""))
-        table.add_row("Network", status.get("network", ""))
+        table.add_row("Network", network)
         table.add_row("API Version", status.get("apiVersion", ""))
 
         console.print(table)
@@ -485,6 +766,7 @@ async def _show_status_async(project_id, zone, tpu_name):
     try:
         tpu = TPUManager(project_id, zone, tpu_name)
         status = await tpu.get_status()
+        network = _network_name(status.get("networkConfig", {}).get("network") or status.get("network"))
 
         table = Table(title="TPU Status")
         table.add_column("Property", style="cyan")
@@ -493,7 +775,7 @@ async def _show_status_async(project_id, zone, tpu_name):
         table.add_row("Name", status.get("name", ""))
         table.add_row("State", status.get("state", ""))
         table.add_row("Type", status.get("acceleratorType", ""))
-        table.add_row("Network", status.get("network", ""))
+        table.add_row("Network", network)
 
         console.print(table)
     except Exception as e:
@@ -527,17 +809,23 @@ def history():
 @cli.command()
 def show_config():
     """Show current configuration"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
+    resolved = _resolve_runtime_credentials(require_tpu=False, verbose=False)
+    if resolved:
+        _config, project_id, zone, tpu_name, queued_resource = resolved
+    else:
+        config = EOConfig()
+        project_id, zone, tpu_name = config.get_credentials()
+        queued_resource = config.get_queued_resource()
 
-    if all([project_id, zone, tpu_name]):
+    if project_id and zone:
         table = Table(title="Current Configuration")
         table.add_column("Setting")
         table.add_column("Value")
 
         table.add_row("Project ID", project_id)
         table.add_row("Zone", zone)
-        table.add_row("TPU Name", tpu_name)
+        table.add_row("TPU Name", tpu_name or "(unset)")
+        table.add_row("Queued Resource", queued_resource or "(unset)")
 
         console.print(table)
     else:
@@ -545,16 +833,178 @@ def show_config():
 
 
 @cli.command()
+def doctor():
+    """Run environment diagnostics for eopod and TPU access."""
+    checks = []
+
+    def add_check(name: str, status: str, details: str, fix: str = ""):
+        checks.append({"name": name, "status": status, "details": details, "fix": fix})
+
+    gcloud_path = shutil.which("gcloud")
+    if gcloud_path:
+        add_check("gcloud", "PASS", f"Found at {gcloud_path}")
+    else:
+        add_check("gcloud", "FAIL", "gcloud CLI not found on PATH", "Install Google Cloud CLI and re-run doctor")
+
+    active_account = None
+    if gcloud_path:
+        auth_result = subprocess.run(
+            ["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"],
+            capture_output=True,
+            text=True,
+        )
+        if auth_result.returncode == 0 and auth_result.stdout.strip():
+            active_account = auth_result.stdout.strip().splitlines()[0]
+            add_check("Auth", "PASS", f"Active account: {active_account}")
+        else:
+            add_check("Auth", "FAIL", "No active gcloud account", "Run: gcloud auth login")
+
+    resolved = _resolve_runtime_credentials(require_tpu=False, verbose=False)
+    if resolved:
+        _config, project_id, zone, tpu_name, queued_resource = resolved
+    else:
+        cfg = EOConfig()
+        project_id, zone, tpu_name = cfg.get_credentials()
+        queued_resource = cfg.get_queued_resource()
+
+    if project_id:
+        add_check("Project", "PASS", f"Project ID: {project_id}")
+    else:
+        add_check(
+            "Project",
+            "FAIL",
+            "Project ID is unset",
+            "Run: eopod configure --project-id <PROJECT_ID> (or set gcloud project)",
+        )
+
+    if zone:
+        add_check("Zone", "PASS", f"Zone: {zone}")
+    else:
+        add_check("Zone", "FAIL", "Zone is unset", "Run: eopod configure --zone <ZONE> (or set gcloud compute/zone)")
+
+    if project_id and gcloud_path:
+        api_result = subprocess.run(
+            [
+                "gcloud",
+                "services",
+                "list",
+                "--enabled",
+                f"--project={project_id}",
+                "--filter=config.name:tpu.googleapis.com",
+                "--format=value(config.name)",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if api_result.returncode == 0 and "tpu.googleapis.com" in api_result.stdout:
+            add_check("TPU API", "PASS", "tpu.googleapis.com is enabled")
+        else:
+            add_check(
+                "TPU API",
+                "FAIL",
+                "tpu.googleapis.com not enabled (or not accessible)",
+                f"Run: gcloud services enable tpu.googleapis.com --project={project_id}",
+            )
+
+    if tpu_name:
+        detail = f"TPU name: {tpu_name}"
+        if queued_resource:
+            detail += f" (queued: {queued_resource})"
+        add_check("TPU Name", "PASS", detail)
+    else:
+        add_check(
+            "TPU Name",
+            "FAIL",
+            "TPU name is unset",
+            "Run: eopod configure --tpu-name <TPU_NAME> (or run from within TPU VM for auto-detect)",
+        )
+
+    tpu_reachable = False
+    if project_id and zone and tpu_name and gcloud_path:
+        tpu_info = _describe_tpu_vm(project_id, zone, tpu_name)
+        if tpu_info:
+            state = tpu_info.get("state", "UNKNOWN")
+            add_check("TPU Describe", "PASS", f"Reachable via API (state: {state})")
+            tpu_reachable = True
+        else:
+            add_check(
+                "TPU Describe",
+                "FAIL",
+                "Failed to describe TPU VM (missing permissions, wrong zone/name, or stale config)",
+                "Re-run: eopod configure (will auto-refresh stale TPU names when possible)",
+            )
+
+    if tpu_reachable and project_id and zone and tpu_name:
+        ssh_result = subprocess.run(
+            [
+                "gcloud",
+                "compute",
+                "tpus",
+                "tpu-vm",
+                "ssh",
+                tpu_name,
+                f"--project={project_id}",
+                f"--zone={zone}",
+                "--worker=0",
+                "--command=true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if ssh_result.returncode == 0:
+            add_check("TPU SSH", "PASS", "Non-interactive SSH command succeeded")
+        else:
+            ssh_error = (ssh_result.stderr or ssh_result.stdout).strip().splitlines()[-1] if (
+                ssh_result.stderr or ssh_result.stdout
+            ) else "SSH command failed"
+            add_check(
+                "TPU SSH",
+                "WARN",
+                ssh_error,
+                "Check VM networking/firewall, IAM, and SSH key setup. Re-run: gcloud compute tpus tpu-vm ssh ...",
+            )
+
+    table = Table(title="eopod Doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status")
+    table.add_column("Details")
+    table.add_column("Suggested Fix")
+
+    status_color = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}
+    for item in checks:
+        color = status_color.get(item["status"], "white")
+        table.add_row(
+            item["name"],
+            f"[{color}]{item['status']}[/{color}]",
+            item["details"],
+            item["fix"],
+        )
+
+    pass_count = sum(1 for item in checks if item["status"] == "PASS")
+    warn_count = sum(1 for item in checks if item["status"] == "WARN")
+    fail_count = sum(1 for item in checks if item["status"] == "FAIL")
+
+    console.print(table)
+    console.print(
+        f"[cyan]Summary:[/cyan] [green]{pass_count} pass[/green], "
+        f"[yellow]{warn_count} warn[/yellow], [red]{fail_count} fail[/red]"
+    )
+
+
+@cli.command()
 @click.option("--worker", default="all", help='Specific worker or "all"')
 @click.option("--shell", default="/bin/bash", help="Shell to use (default: /bin/bash)")
 def terminal(worker, shell):
     """Open an interactive terminal session with TPU workers"""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
+    _ = shell
+    resolved = _resolve_runtime_credentials(require_tpu=True, verbose=True)
+    if not resolved:
+        console.print(
+            "[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]"
+        )
         return
+    _config, project_id, zone, tpu_name, _queued_resource = resolved
 
     # Show welcome message
     welcome_panel = Panel.fit(
@@ -723,7 +1173,7 @@ async def smi():
 async def clean_logs():
     """Clean up logs and temporary files on the TPU VM"""
     _config, tpu = _get_config_and_manager()
-    command = """
+    command = r"""
     sudo bash -c 'echo "[*] Vacuuming journal logs (keeping 1 second)..." && journalctl --vacuum-time=1s && echo "[*] Deleting rotated/compressed logs..." && find /var/log -type f \( -name "*.gz" -o -name "*.1" -o -name "*.old" -o -name "*.bak" -o -name "*-????????" -o -name "*.log.[0-9]*" \) -print -delete && echo "[*] Truncating active log files..." && find /var/log -type f -name "*.log" -exec truncate -s 0 {} \; && echo "[*] Vacuuming journal logs to 50MB cap..." && journalctl --vacuum-size=5M && docker system prune -af --volumes && echo "[✔] Cleanup complete."'
     """  # noqa
     await tpu.execute_command(command.strip(), stream=False)
@@ -800,23 +1250,11 @@ def auto_config_ray(
     if spot_tpu_name and (not spot_tpu_project_id or not spot_tpu_zone):
         try:
             if not spot_tpu_project_id:
-                result = subprocess.run(
-                    ["gcloud", "config", "get-value", "project"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                spot_tpu_project_id = result.stdout.strip()
+                spot_tpu_project_id = _read_gcloud_config_property("project")
                 console.print(f"[green]Using current project for spot TPU: {spot_tpu_project_id}[/green]")
 
             if not spot_tpu_zone:
-                result = subprocess.run(
-                    ["gcloud", "config", "get-value", "compute/zone"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                spot_tpu_zone = result.stdout.strip()
+                spot_tpu_zone = _read_gcloud_config_property("compute/zone")
                 console.print(f"[green]Using current zone for spot TPU: {spot_tpu_zone}[/green]")
         except Exception as e:
             console.print(f"[red]Failed to get default project/zone: {e!s}[/red]")
@@ -877,10 +1315,11 @@ def auto_config_ray(
                 "-m",
                 "eformer.executor.patch_tpus_ray",
                 "--self-job",
-                "--head-only" if not head_has_tpu else "",
+                "--head-only" if not head_has_tpu else None,
                 "--head-node-ip",
                 head_ip,
-            ].filter(None)
+            ]
+            cmd = [part for part in cmd if part]
 
             subprocess.run(" ".join(cmd), shell=True, check=True)
             console.print("[green]Ray head started successfully[/green]")
@@ -1178,12 +1617,13 @@ async def open_port(
     verify_tag,
 ):
     """Creates GCP firewall rules to open ports for TPU VMs."""
-    config = EOConfig()
-    project_id, zone, tpu_name = config.get_credentials()
-
-    if not all([project_id, zone, tpu_name]):
-        console.print("[red]Please configure eopod first using 'eopod configure'[/red]")
+    resolved = _resolve_runtime_credentials(require_tpu=True, verbose=True)
+    if not resolved:
+        console.print(
+            "[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]"
+        )
         return
+    _config, project_id, zone, tpu_name, _queued_resource = resolved
 
     safe_tpu_name = tpu_name.lower().replace("_", "-")
 
@@ -1194,7 +1634,8 @@ async def open_port(
     if network is None:
         try:
             tpu_info = await tpu_manager.get_tpu_info()
-            network = tpu_info.get("networkConfig", {}).get("network", "default")
+            raw_network = tpu_info.get("networkConfig", {}).get("network", "default")
+            network = _network_name(raw_network)
             console.print(f"Using network: {network}")
         except Exception as e:
             console.print(f"[yellow]Could not determine network from TPU config: {e}[/yellow]")
@@ -1204,7 +1645,7 @@ async def open_port(
     if verify_tag:
         try:
             tpu_info = await tpu_manager.get_tpu_info()
-            vm_tags = tpu_info.get("networkConfig", {}).get("networkTags", [])
+            vm_tags = tpu_info.get("tags") or tpu_info.get("networkConfig", {}).get("networkTags", [])
             if effective_target_tag not in vm_tags:
                 console.print(f"[red]Target tag '{effective_target_tag}' is not applied to the TPU VM![/red]")
                 console.print(f"[yellow]Available tags: {', '.join(vm_tags) if vm_tags else 'None'}[/yellow]")
@@ -1264,7 +1705,7 @@ async def open_port(
 
             cmd_parts.append(f"--target-tags={effective_target_tag}")
 
-            cmd_parts.append(f"--description='{description}'")
+            cmd_parts.append(f"--description={shlex.quote(description)}")
 
             cmd = " ".join(cmd_parts)
             console.print(f"[green]Executing:[/green]\n{cmd}")
