@@ -209,6 +209,132 @@ def _describe_tpu_vm(project_id: str, zone: str, tpu_name: str) -> dict | None:
         return None
 
 
+def _normalize_target_tags(tags: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized = []
+    seen = set()
+    for tag in tags or []:
+        value = str(tag).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _preferred_tpu_target_tags(tags: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized = _normalize_target_tags(tags)
+    if not normalized:
+        return []
+
+    # TPU-specific per-node tags are the safest match for firewall rules.
+    tpu_specific = [tag for tag in normalized if tag.startswith("tpu-")]
+    if tpu_specific:
+        return tpu_specific
+
+    non_google = [tag for tag in normalized if not tag.startswith("x-google-")]
+    return non_google or normalized
+
+
+def _detect_instance_tags_from_metadata() -> list[str]:
+    raw_tags = _metadata_value("instance/tags")
+    if not raw_tags:
+        return []
+
+    try:
+        parsed = json.loads(raw_tags)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, list):
+        return _preferred_tpu_target_tags(parsed)
+
+    return _preferred_tpu_target_tags([line.strip() for line in raw_tags.splitlines() if line.strip()])
+
+
+def _project_number_from_resource_name(resource_name: str | None) -> str | None:
+    if not resource_name:
+        return None
+
+    match = re.search(r"(?:^|/)projects/(\d+)(?:/|$)", resource_name)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _read_project_number(project_id: str) -> str | None:
+    result = subprocess.run(
+        ["gcloud", "projects", "describe", project_id, "--format=value(projectNumber)"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _describe_firewall_rule(project_id: str, rule_name: str) -> dict | None:
+    result = subprocess.run(
+        [
+            "gcloud",
+            "compute",
+            "firewall-rules",
+            "describe",
+            rule_name,
+            f"--project={project_id}",
+            "--format=json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+
+
+def _resolve_tpu_vm_target_tags(
+    project_id: str,
+    zone: str,
+    tpu_name: str,
+    tpu_info: dict | None = None,
+) -> list[str]:
+    tpu_info = tpu_info or _describe_tpu_vm(project_id, zone, tpu_name)
+    if not tpu_info:
+        return []
+
+    direct_tags = _preferred_tpu_target_tags(
+        tpu_info.get("tags") or tpu_info.get("networkConfig", {}).get("networkTags", [])
+    )
+    if direct_tags:
+        return direct_tags
+
+    project_number = (
+        _project_number_from_resource_name(tpu_info.get("queuedResource"))
+        or _project_number_from_resource_name(tpu_info.get("name"))
+        or _read_project_number(project_id)
+    )
+    tpu_id = str(tpu_info.get("id") or "").strip()
+    if project_number and tpu_id:
+        healthcheck_rule = _describe_firewall_rule(
+            project_id,
+            f"tpu-{project_number}-{tpu_id}-healthcheck-fw",
+        )
+        healthcheck_tags = _preferred_tpu_target_tags((healthcheck_rule or {}).get("targetTags", []))
+        if healthcheck_tags:
+            return healthcheck_tags
+
+    detected_tpu, _ = _detect_tpu_identity_from_current_vm(project_id, zone)
+    if detected_tpu == tpu_name:
+        metadata_tags = _detect_instance_tags_from_metadata()
+        if metadata_tags:
+            return metadata_tags
+
+    return []
+
+
 def _resolve_runtime_credentials(require_tpu: bool, verbose: bool = False):
     config = EOConfig()
     project_id, zone, tpu_name = config.get_credentials()
@@ -376,9 +502,7 @@ def configure(project_id, zone, tpu_name):
         if current_queued:
             queued_resource = current_queued
     else:
-        console.print(
-            f"[yellow]Could not verify TPU '{tpu_name}' in {zone}. Saving configuration as provided.[/yellow]"
-        )
+        console.print(f"[yellow]Could not verify TPU '{tpu_name}' in {zone}. Saving configuration as provided.[/yellow]")
 
     config.set_credentials(project_id, zone, tpu_name, queued_resource=queued_resource)
     config.save_config()
@@ -955,9 +1079,11 @@ def doctor():
         if ssh_result.returncode == 0:
             add_check("TPU SSH", "PASS", "Non-interactive SSH command succeeded")
         else:
-            ssh_error = (ssh_result.stderr or ssh_result.stdout).strip().splitlines()[-1] if (
-                ssh_result.stderr or ssh_result.stdout
-            ) else "SSH command failed"
+            ssh_error = (
+                (ssh_result.stderr or ssh_result.stdout).strip().splitlines()[-1]
+                if (ssh_result.stderr or ssh_result.stdout)
+                else "SSH command failed"
+            )
             add_check(
                 "TPU SSH",
                 "WARN",
@@ -1000,9 +1126,7 @@ def terminal(worker, shell):
     _ = shell
     resolved = _resolve_runtime_credentials(require_tpu=True, verbose=True)
     if not resolved:
-        console.print(
-            "[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]"
-        )
+        console.print("[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]")
         return
     _config, project_id, zone, tpu_name, _queued_resource = resolved
 
@@ -1558,7 +1682,7 @@ def auto_config_ray(
 @click.option(
     "--target-tag",
     default=None,
-    help="Network tag for VMs. If omitted, defaults to 'tpu-<your-tpu-name>'. IMPORTANT: VMs must have this tag!",
+    help="Network tag for VMs. If omitted, eopod auto-detects the TPU VM tag from GCP.",
 )
 @click.option(
     "--source-ranges",
@@ -1619,22 +1743,23 @@ async def open_port(
     """Creates GCP firewall rules to open ports for TPU VMs."""
     resolved = _resolve_runtime_credentials(require_tpu=True, verbose=True)
     if not resolved:
-        console.print(
-            "[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]"
-        )
+        console.print("[red]Could not resolve project/zone/tpu automatically. Run 'eopod configure' first.[/red]")
         return
     _config, project_id, zone, tpu_name, _queued_resource = resolved
 
     safe_tpu_name = tpu_name.lower().replace("_", "-")
 
-    effective_target_tag = target_tag if target_tag is not None else f"{safe_tpu_name}"
-
     tpu_manager = TPUManager(project_id, zone, tpu_name)
+    tpu_info = None
+
+    try:
+        tpu_info = await tpu_manager.get_tpu_info()
+    except Exception as e:
+        console.print(f"[yellow]Could not fetch TPU details automatically: {e}[/yellow]")
 
     if network is None:
         try:
-            tpu_info = await tpu_manager.get_tpu_info()
-            raw_network = tpu_info.get("networkConfig", {}).get("network", "default")
+            raw_network = (tpu_info or {}).get("networkConfig", {}).get("network", "default")
             network = _network_name(raw_network)
             console.print(f"Using network: {network}")
         except Exception as e:
@@ -1642,12 +1767,28 @@ async def open_port(
             console.print("[yellow]Using 'default' network instead[/yellow]")
             network = "default"
 
+    detected_target_tags = []
+    if target_tag is None:
+        detected_target_tags = _resolve_tpu_vm_target_tags(project_id, zone, tpu_name, tpu_info=tpu_info)
+        if detected_target_tags:
+            console.print(f"[green]Auto-detected TPU VM target tag(s): {', '.join(detected_target_tags)}[/green]")
+        else:
+            detected_target_tags = [safe_tpu_name]
+            console.print(
+                "[yellow]Could not auto-detect the TPU VM target tag. "
+                f"Falling back to '{safe_tpu_name}'. If the port still does not open, "
+                "pass --target-tag explicitly.[/yellow]"
+            )
+    else:
+        detected_target_tags = _normalize_target_tags(target_tag.split(","))
+        console.print(f"[green]Using user-provided target tag(s): {', '.join(detected_target_tags)}[/green]")
+
     if verify_tag:
         try:
-            tpu_info = await tpu_manager.get_tpu_info()
-            vm_tags = tpu_info.get("tags") or tpu_info.get("networkConfig", {}).get("networkTags", [])
-            if effective_target_tag not in vm_tags:
-                console.print(f"[red]Target tag '{effective_target_tag}' is not applied to the TPU VM![/red]")
+            vm_tags = _resolve_tpu_vm_target_tags(project_id, zone, tpu_name, tpu_info=tpu_info)
+            missing_tags = [tag for tag in detected_target_tags if tag not in vm_tags]
+            if missing_tags:
+                console.print(f"[red]Target tag(s) '{', '.join(missing_tags)}' are not applied to the TPU VM![/red]")
                 console.print(f"[yellow]Available tags: {', '.join(vm_tags) if vm_tags else 'None'}[/yellow]")
                 if click.confirm("Do you want to add this tag to the TPU VM?", default=False):
                     console.print("[yellow]Adding tag functionality not implemented yet[/yellow]")
@@ -1666,11 +1807,18 @@ async def open_port(
 
             try:
                 cmd = f"gcloud compute firewall-rules describe {rule_name} --project={project_id} --format=json"
-                _ = await run_command(cmd, capture_output=True)
+                existing_rule_raw = await run_command(cmd, capture_output=True)
+                existing_rule = json.loads(existing_rule_raw)
                 rule_exists = True
                 console.print(f"Rule '{rule_name}' already exists.")
 
-                if not update_existing:
+                existing_target_tags = _normalize_target_tags(existing_rule.get("targetTags", []))
+                if sorted(existing_target_tags) != sorted(detected_target_tags):
+                    console.print(
+                        "[yellow]Existing rule uses stale target tags. "
+                        "Updating it to match the TPU VM automatically.[/yellow]"
+                    )
+                elif not update_existing:
                     console.print("[yellow]Skipping (use --update-existing to update)[/yellow]")
                     continue
 
@@ -1684,11 +1832,17 @@ async def open_port(
                 "update" if rule_exists else "create",
                 rule_name,
                 f"--project={project_id}",
-                f"--direction={current_direction.upper()}",
                 f"--priority={priority}",
-                f"--network={network}",
-                "--action=ALLOW",
             ]
+
+            if not rule_exists:
+                cmd_parts.extend(
+                    [
+                        f"--direction={current_direction.upper()}",
+                        f"--network={network}",
+                        "--action=ALLOW",
+                    ]
+                )
 
             if protocol == "all":
                 cmd_parts.append("--rules=all")
@@ -1703,7 +1857,7 @@ async def open_port(
             if current_direction.lower() == "egress":
                 cmd_parts.append(f"--destination-ranges={destination_ranges}")
 
-            cmd_parts.append(f"--target-tags={effective_target_tag}")
+            cmd_parts.append(f"--target-tags={','.join(detected_target_tags)}")
 
             cmd_parts.append(f"--description={shlex.quote(description)}")
 

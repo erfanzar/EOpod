@@ -25,7 +25,7 @@ wheels = [
 
 [[package]]
 name = "eopod"
-version = "0.0.35"
+version = "0.0.36"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
